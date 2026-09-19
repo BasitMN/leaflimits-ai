@@ -76,7 +76,10 @@ export class CurrentPage {
     MEASUREMENTS.map((meta) => {
       const live = this.store.status()[meta.key] ?? null;
       const state: LimitState = live?.state ?? 'unknown';
-      return { meta, live, state, stateText: STATE_TEXT[state], range: this.store.profile()?.limits[meta.key] ?? null };
+      const range = this.store.profile()?.limits[meta.key] ?? null;
+      // Right after saving, a limit exists but the server has not classified a reading against it yet.
+      const stateText = state === 'unknown' && range ? 'Waiting for a reading' : STATE_TEXT[state];
+      return { meta, live, state, stateText, range };
     }),
   );
 
