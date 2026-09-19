@@ -62,6 +62,20 @@ for pair in MQTT_PORT:1883 NODERED_PORT:1880 INFLUX_PORT:8086 GRAFANA_PORT:3000;
     fi
 done
 
+echo "Checking container names"
+project=$(envval COMPOSE_PROJECT_NAME microhydros)
+for svc in mosquitto node-red influxdb grafana; do
+    cname="${project}-${svc}"
+    owner=$(docker ps -a --filter "name=^/${cname}\$" --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null | head -1 || true)
+    if [ -z "$owner" ]; then
+        ok "name $cname is free"
+    elif [ "$owner" = "$project" ]; then
+        ok "name $cname belongs to this project"
+    else
+        fail "container name $cname is already used by another project ('$owner'). Set COMPOSE_PROJECT_NAME to something else in .env"
+    fi
+done
+
 if [ -r /proc/meminfo ]; then
     avail_mb=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
     if [ "${avail_mb:-0}" -lt 800 ]; then warn "only ${avail_mb} MB RAM available (about 800 MB recommended)"; else ok "${avail_mb} MB RAM available"; fi
@@ -102,4 +116,5 @@ green "MicroHydros backend is running."
 echo "  Node-RED : http://$(hostfor "$nr_bind"):$(envval NODERED_PORT 1880)"
 echo "  Grafana  : http://$(hostfor "$(envval GRAFANA_BIND)"):$(envval GRAFANA_PORT 3000)"
 echo "  MQTT     : port $(envval MQTT_PORT 1883)"
+echo "  Project  : $project"
 echo "Next: ./scripts/smoke-test.sh"
