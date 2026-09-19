@@ -2,7 +2,7 @@
 
 Extension and deployment plan for MicroHydros: an Angular app, AI suggestions, a parallel Node-RED flow and a portable deployment.
 
-**Author:** BasitMN   **Written:** 2026-09-19   **Revised:** 2026-09-19 after the live server check   **Status:** plan. Phases D1 and D1b written on branch `deploy` and statically checked, not yet run on Docker. Nothing else implemented
+**Author:** BasitMN   **Written:** 2026-09-19   **Revised:** 2026-09-19 after the live server check   **Status:** the Angular app and the Node-RED LeafLimits tab are built and tested (app: 15 unit tests; tab: 51 unit tests and 13 integration tests against a real Node-RED 5.0.7). Not yet imported into the live Node-RED. Phases D1 and D1b (deploy files) are written but not yet run on Docker
 
 The original MicroHydros stack (PR #16) is not changed by this plan. LeafLimits lives in its own private repository, `BasitMN/leaflimits-ai`. Its `main` branch is an exact copy of the PR #16 branch, and the work happens on other branches.
 
@@ -37,6 +37,28 @@ The original MicroHydros stack (PR #16) is not changed by this plan. LeafLimits 
 | **Storage tab** | **The "InfluxDB storage" tab was disabled by mistake. The last stored reading is from 2026-09-18 22:08 UTC, the same minute the flows file was last saved.** Enabling it and pressing Deploy in the Node-RED editor fixes it |
 
 ## 4. Architecture
+
+### Chosen approach: an additive tab in the live Node-RED
+
+LeafLimits is one new Node-RED tab in the existing MicroHydros Node-RED on Hetzner. It is imported **disabled** and only
+reads the validated readings that the MQTT Validation flow already publishes, so the validation flow and the InfluxDB
+storage flow are never disabled or edited. Disabling the tab returns the system to today's behaviour.
+
+```
+MQTT Validation tab   raw -> validate -> validated/+ ----> InfluxDB storage tab (unchanged)
+                                              |
+                                              +--> LeafLimits tab (new, additive)
+                                                     evaluate against the limits -> alerts on MQTT
+                                                     HTTP API and the web app under /leaflimits/
+                        limits kept as a retained MQTT message per device
+```
+
+Only Node-RED is touched. The token and the Anthropic key are tab credential variables (stored encrypted by Node-RED,
+not in the flow file), the limits are a retained MQTT message, and the app files go into Node-RED's own data folder. No
+change to Mosquitto, InfluxDB, Grafana, the compose file or `settings.js`. Details, the API and the import steps are in
+`docker/node-red/leaflimits/README.md`.
+
+### Earlier designs (kept for reference and for the workplace deployment)
 
 ```
 ESP32 -> Mosquitto :1884 -> [original flow: validate] -> validated/+
@@ -111,6 +133,12 @@ Stored in Node-RED file context, keyed by device ID. The default profile reprodu
 
 The Angular app uses standalone components with signals and `@angular/pwa`, a `LimitsService`, a token interceptor and a min < max validator. The build output goes into Node-RED's `httpStatic`, so there is one container, one origin and no CORS. Screens are Capture, Review and Current (see `app/README.md`).
 
+In the additive tab the routes live under `/leaflimits/api/...` and the app is served at `/leaflimits/` by Node-RED itself, over
+plain HTTP on the existing Node-RED port. Limits are stored as a retained MQTT message per device, so they survive a restart.
+Readings are classified `ok`, `low` or `high` (3 readings to raise, 2 to clear, 2% hysteresis) and an alert is published on
+`microhydros/v1/devices/{id}/limits/alert` only when the state changes. Nothing is written to InfluxDB in the first version,
+so Grafana has no threshold lines yet.
+
 ## 9. Making the deployment portable
 
 ### Why cloning is not enough today
@@ -140,7 +168,7 @@ What already helps: image versions are pinned and multi-arch (ARM to x86 works),
 | D4 | Firmware | Change the broker default to a hostname such as `mqtt://hydro.<domain>:8883`. Reflash once. Workplace WiFi credentials set through menuconfig. The current setup supports WPA2-PSK only, not WPA2-Enterprise | Moving servers means a DNS change, with no reflash |
 | D5 | Proof | Run the D1 commands at stage E1 (your own machine). Then run at E2 (the existing Hetzner server) after the deadline. E3 (throwaway VM, deleted afterwards) is optional and not planned | The smoke test passes on a machine that never saw the project |
 
-**Progress on D1 (branch `deploy`):** the env-driven `compose.yaml`, the seeded `flows.json` (built by `scripts/build-seed-flows.py`), `settings.js`, `.env.example`, `.gitattributes`, `deploy.sh`, `smoke-test.sh`, `backup.sh`, the password-hash helper and `docs/DEPLOYMENT.md` are written and statically checked. Not yet run against Docker. `restore.sh` is still missing. **D1b** (project name, container names and memory limits from `.env`, plus a container-name check in `deploy.sh`) is written and statically checked.
+**Progress on D1 (branch deploy):** the env-driven `compose.yaml`, the seeded `flows.json` (built by `scripts/build-seed-flows.py`), `settings.js`, `.env.example`, `.gitattributes`, `deploy.sh`, `smoke-test.sh`, `backup.sh`, the password-hash helper and `docs/DEPLOYMENT.md` are written and statically checked. Not yet run against Docker. `restore.sh` is still missing. **D1b** (project name, container names and memory limits from `.env`, plus a container-name check in `deploy.sh`) is written and statically checked.
 
 Data migration is optional. Starting fresh is simplest. To keep history, run `influx backup` on Hetzner and restore at the new server. Grafana needs nothing, because its dashboards are provisioned.
 
@@ -162,6 +190,11 @@ Rules:
 - Creating a cloud resource, or changing anything on the live server, needs explicit approval each time.
 - Move to the next stage only when the previous one passes.
 
+**Update, no PC available:** stage E1 is replaced by what the phone and the server can do. The LeafLimits tab was tested on the
+phone in a real Node-RED 5.0.7 with an in-process MQTT broker and a fake Claude API (13 integration tests). The Docker
+packaging (`deploy.sh`, `smoke-test.sh`, the seeded flows) can be proven in GitHub Actions, or in an isolated test project
+on Hetzner with its own ports and memory limits, instead of on a PC.
+
 ### Workplace checklist
 
 - Get permission from the employer and IT to run a school project on their server.
@@ -174,16 +207,15 @@ Rules:
 
 ## 10. Build phases for LeafLimits
 
-| # | Work | Where | Done when |
-|---|---|---|---|
-| 0 | Server check (done, see section 3) | Live server, read-only | Numbers known |
-| 1 | Create bucket `microhydros_extra` with a scoped write token | E1 first, E2 after the deadline | Test write succeeds |
-| 2 | New compose project and Node-RED with the evaluation flow, on free ports | E1 first, E2 after the deadline | New bucket fills while the old bucket's count is unchanged (E2) |
-| 3 | Limits endpoints, tested with `curl` | E0 and E1 | A PUT changes the state of the next reading |
-| 4 | AI endpoint with schema and rate limit | E1 | A test photo returns valid JSON |
-| 5 | Grafana dashboard: values, threshold lines, state history | E1 | Lines move when limits change |
-| 6 | Angular app | E0 and E1 | Photo, edit, save, and Grafana updates |
-| 7 | HTTPS via reverse proxy, README and demo script | E2 or E3 | Works from the phone |
+| # | Work | Status |
+|---|---|---|
+| 0 | Server check | Done (section 3) |
+| 1 | Angular app: Current, Photo, Review, Settings, mock backend | Done. 15 unit tests, 275 kB build |
+| 2 | Node-RED tab: evaluation, limits API, retained-MQTT storage, app hosting | Done. 51 unit tests and 13 integration tests |
+| 3 | AI suggestion endpoint with schema checks, clamping and a rate limit | Done and tested against a fake Claude API. Needs a real Anthropic API key to try for real |
+| 4 | Import the tab into the live Node-RED (disabled), set the token, enable | Waiting for you. Steps in `docker/node-red/leaflimits/README.md` |
+| 5 | Grafana threshold lines and alert history | Not started. Needs limit data in InfluxDB, which v1 does not write |
+| 6 | HTTPS in front of the app and API | Not started. Part of the D2 hardening |
 
 ## 11. Risks
 
@@ -198,11 +230,15 @@ Rules:
 | API cost abuse | Token auth plus rate limit |
 | Public anonymous MQTT and open ports | Hardening phase D2 |
 | Employer policy blocks the deployment | Ask before building anything for the workplace |
+| The tab runs in the same Node-RED process as the team's flows | Small loop-free functions, imported disabled, deployed with "Modified flows" only, and a one-click rollback (disable the tab) |
+| The token and the app travel over plain HTTP | Use it on a trusted network, and add HTTPS in front later (D2) |
 
 ## 12. Open items
 
 - **Re-enable the "InfluxDB storage" tab on the live server.** It was disabled by mistake. This is a one-click change in the Node-RED editor, and I have not made it.
 - Confirm the PC (stage E1) has Docker with Compose v2, about 1 GB free RAM and the default ports free.
+- **Import the LeafLimits tab into the live Node-RED.** Only you can log in to the editor. The steps, the backup and the rollback are in `docker/node-red/leaflimits/README.md`.
+- **Get an Anthropic API key** and set it as the tab variable `ANTHROPIC_API_KEY`. Without it the app still works, with limits entered by hand.
 - Confirm the DS18B20 ROM pinning (water vs external probe) is finished.
 - Decide whether the extension stays personal or is offered to the team as a PR after the deadline.
 - Get workplace permission before any work there (section 9 checklist).
