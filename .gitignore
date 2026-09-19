@@ -19,3 +19,14 @@ firmware/esp32s3/.vscode/
 
 #Local Docker secrets
 .env
+
+# LeafLimits additions: secrets and generated files
+.env.*
+!.env.example
+flows_cred.json
+.config.*.json
+*.pem
+*.key
+node_modules/
+.angular/
+.claude/
