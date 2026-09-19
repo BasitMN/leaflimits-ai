@@ -2,7 +2,7 @@
 
 Extension and deployment plan for MicroHydros: an Angular app, AI suggestions, a parallel Node-RED flow and a portable deployment.
 
-**Author:** BasitMN   **Written:** 2026-09-19   **Revised:** 2026-09-19 after the live server check   **Status:** plan, nothing implemented
+**Author:** BasitMN   **Written:** 2026-09-19   **Revised:** 2026-09-19 after the live server check   **Status:** plan. Phase D1 files written on branch `deploy` and statically checked, not yet run on Docker. Nothing else implemented
 
 The original MicroHydros stack (PR #16) is not changed by this plan. LeafLimits lives in its own private repository, `BasitMN/leaflimits-ai`. Its `main` branch is an exact copy of the PR #16 branch, and the work happens on other branches.
 
@@ -73,7 +73,7 @@ Isolation rules for the add-on mode:
 | Repository | `git@github.com:BasitMN/leaflimits-ai.git` (private) |
 | `main` | Exact copy of `feature/esp32s3-firmware` (PR #16), same commit IDs |
 | `app` | The LeafLimits plan and the `app/` folder for the Angular app |
-| `deploy` (planned) | Portable deployment work from section 9 |
+| `deploy` | Portable deployment work from section 9 (phase D1 in progress) |
 | Commit identity | `BasitMN <43453765+BasitMN@users.noreply.github.com>` |
 | Team repository | Not a remote of this repository, and never pushed to from here |
 
@@ -138,6 +138,8 @@ What already helps: image versions are pinned and multi-arch (ARM to x86 works),
 | D3 | LeafLimits in the deploy | Multi-stage Dockerfile builds the Angular app into the LeafLimits Node-RED image, so the server needs no Node.js. `ANTHROPIC_API_KEY` and the API token go in `.env`. Relative API URLs | `docker compose up -d --build` starts everything |
 | D4 | Firmware | Change the broker default to a hostname such as `mqtt://hydro.<domain>:8883`. Reflash once. Workplace WiFi credentials set through menuconfig. The current setup supports WPA2-PSK only, not WPA2-Enterprise | Moving servers means a DNS change, with no reflash |
 | D5 | Proof | Run the D1 commands on a throwaway server (for example a small Hetzner Cloud VM, deleted afterwards) | The smoke test passes on a machine that never saw the project |
+
+**Progress on D1 (branch `deploy`):** the env-driven `compose.yaml`, the seeded `flows.json` (built by `scripts/build-seed-flows.py`), `settings.js`, `.env.example`, `.gitattributes`, `deploy.sh`, `smoke-test.sh`, `backup.sh`, the password-hash helper and `docs/DEPLOYMENT.md` are written and statically checked. Not yet run against Docker. `restore.sh` is still missing.
 
 Data migration is optional. Starting fresh is simplest. To keep history, run `influx backup` on Hetzner and restore at the new server. Grafana needs nothing, because its dashboards are provisioned.
 
