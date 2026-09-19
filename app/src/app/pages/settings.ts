@@ -1,6 +1,7 @@
-import { Component, inject } from '@angular/core';
+import { Component, inject, signal } from '@angular/core';
 import { FormControl, FormGroup, ReactiveFormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
+import { API_KEY_WARNING, looksLikeApiKey } from '../secrets';
 import { Session } from '../session';
 
 @Component({
@@ -9,10 +10,16 @@ import { Session } from '../session';
   template: `
     <form class="card" [formGroup]="form" (ngSubmit)="save()">
       <h2>Settings</h2>
-      <label class="field"><span>Access token</span>
+      <label class="field"><span>LeafLimits access token</span>
         <input type="password" formControlName="token" autocomplete="off" />
       </label>
-      <p class="hint">The token is kept in this browser only and sent with every request.</p>
+      <p class="hint">
+        The token set on the server for LeafLimits (in the demo runner it is <code>demo</code>). It is kept in this
+        browser only. This is <strong>not</strong> your Anthropic API key. That key stays on the server.
+      </p>
+      @if (problem(); as p) {
+        <p class="error" role="alert">{{ p }}</p>
+      }
       <label class="field"><span>Device</span>
         <input type="text" formControlName="device" autocomplete="off" />
       </label>
@@ -25,6 +32,7 @@ export class SettingsPage {
   private readonly session = inject(Session);
   private readonly router = inject(Router);
 
+  protected readonly problem = signal<string | null>(null);
   protected readonly form = new FormGroup({
     token: new FormControl(this.session.token(), { nonNullable: true }),
     device: new FormControl(this.session.device(), { nonNullable: true }),
@@ -32,6 +40,12 @@ export class SettingsPage {
 
   protected async save(): Promise<void> {
     const v = this.form.getRawValue();
+    if (looksLikeApiKey(v.token)) {
+      this.form.controls.token.setValue('');
+      this.problem.set(API_KEY_WARNING);
+      return;
+    }
+    this.problem.set(null);
     this.session.update(v.token, v.device);
     await this.router.navigateByUrl('/');
   }
