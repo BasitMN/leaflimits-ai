@@ -29,6 +29,7 @@ The original MicroHydros stack (PR #16) is not changed by this plan. LeafLimits 
 | Other workloads | Six other containers share the server: pm-iot-ui, grafana, influxdb, nodered, mosquitto-server, portainer |
 | Ports already in use | 1880, 1881, 1883, 1884, 3000, 3001, 3002, 8086, 8087, 9000, 9001, 9443. LeafLimits must use other ports |
 | Deployment folder | `/root/microhydros/docker` is a plain copy of the files, not a git checkout |
+| Link to the team repo | None. `/root/microhydros` is a one-time copy of the files: no git checkout, no git config, no cron, systemd timer, webhook or Actions runner. The running flows live only in the Docker volume `docker_node_red_data` (mounted at `/data`), not in any repo |
 | Repo match | Compose file, Node-RED settings, Grafana datasource and dashboard match the repo. The validation and storage function code in the live flows is identical to the repo |
 | Palette | Only core Node-RED nodes are used, so there are no extra packages to install |
 | Mosquitto | `allow_anonymous true`, published on `0.0.0.0:1884`, no TLS |
@@ -231,6 +232,7 @@ on Hetzner with its own ports and memory limits, instead of on a PC.
 | Public anonymous MQTT and open ports | Hardening phase D2 |
 | Employer policy blocks the deployment | Ask before building anything for the workplace |
 | The tab runs in the same Node-RED process as the team's flows | Small loop-free functions, imported disabled, deployed with "Modified flows" only, and a one-click rollback (disable the tab) |
+| The live flows exist only in a Docker volume, not in any repo | Back up `flows.json` and `flows_cred.json` before every change, keep the LeafLimits export in this repo, and re-import it after any rebuild of the volume (for example `docker compose down -v`). Consider a scheduled backup |
 | The token and the app travel over plain HTTP | Use it on a trusted network, and add HTTPS in front later (D2) |
 
 ## 12. Open items
@@ -238,6 +240,7 @@ on Hetzner with its own ports and memory limits, instead of on a PC.
 - **Re-enable the "InfluxDB storage" tab on the live server.** It was disabled by mistake. This is a one-click change in the Node-RED editor, and I have not made it.
 - Confirm the PC (stage E1) has Docker with Compose v2, about 1 GB free RAM and the default ports free.
 - **Import the LeafLimits tab into the live Node-RED.** Only you can log in to the editor. The steps, the backup and the rollback are in `docker/node-red/leaflimits/README.md`.
+- Decide on a scheduled backup of the live flows (at least weekly and before every change). Today nothing backs up the Node-RED volume.
 - **Get an Anthropic API key** and set it as the tab variable `ANTHROPIC_API_KEY`. Without it the app still works, with limits entered by hand.
 - Confirm the DS18B20 ROM pinning (water vs external probe) is finished.
 - Decide whether the extension stays personal or is offered to the team as a PR after the deadline.

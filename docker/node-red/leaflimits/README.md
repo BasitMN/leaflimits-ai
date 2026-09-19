@@ -92,6 +92,18 @@ Everything below touches only Node-RED and its own data folder. Mosquitto, Influ
 
 The storage tab ("InfluxDB storage") must be enabled for readings to reach InfluxDB. That is independent of this tab.
 
+## Where the live flows live, and rebuilding
+
+The live Node-RED on Hetzner is not linked to any git repository. `/root/microhydros` is a one-time copy of the files, and
+the running flows exist **only in the Docker volume** `docker_node_red_data` (mounted at `/data`). The tab, its variables
+(in `flows_cred.json`) and the app files in `/data/leaflimits-app` are all inside that volume. So:
+
+- A repository update never changes or overwrites them, and importing the tab does not touch the team repository.
+- If the volume is deleted or replaced (for example `docker compose down -v`), the team's flows and this tab are gone
+  together. Re-import the team flows, then `flows/leaflimits.json`, re-enter `LEAFLIMITS_TOKEN` and `ANTHROPIC_API_KEY`
+  and copy the app files back (steps 2 to 5 above). Restoring the backup from step 1 does the same in one go.
+- Keep the backup files from step 1 somewhere other than the server. A backup is only useful if it survives the server.
+
 ## Limits of this design
 
 - It runs in the same Node-RED process as the validation flow. The functions are small and loop-free, but a mistake here
