@@ -33,3 +33,6 @@ node_modules/
 
 # Backups contain secrets
 backups/
+# Secret key files must never be committed, wherever they are created
+.anthropic_key
+*_key
