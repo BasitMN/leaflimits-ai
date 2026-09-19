@@ -59,6 +59,32 @@ All of these are in `.env`. See `.env.example` for the full list.
 | `NODERED_ADMIN_USER`, `NODERED_ADMIN_HASH` | Node-RED editor login. Keep the single quotes around the hash |
 | `NODERED_CREDENTIAL_SECRET` | Encrypts stored credentials |
 
+## Running next to another stack on the same host
+
+A second copy can run beside an existing one, for example on the Hetzner server (stage E2 of
+`docs/PLAN.md`). Use a separate folder with its own `.env` and set:
+
+```dotenv
+COMPOSE_PROJECT_NAME=leaflimits-test
+MQTT_PORT=1885
+NODERED_PORT=1882
+INFLUX_PORT=8088
+GRAFANA_PORT=3003
+MOSQUITTO_MEM=64m
+NODERED_MEM=256m
+INFLUX_MEM=512m
+GRAFANA_MEM=384m
+```
+
+- The project name prefixes container, volume and network names, so nothing is shared with the
+  other stack. `deploy.sh` stops with a clear message if a container name is already used by
+  another project.
+- The `*_MEM` values are ceilings per container. A container that reaches its ceiling is
+  restarted on its own, so it cannot cause the host to kill a container of the other stack.
+- Check free ports first with `ss -tlnp`. On the Hetzner server, 1880, 1881, 1883, 1884,
+  3000 to 3002, 8086, 8087 and 9000 to 9443 are taken.
+- All scripts (`deploy.sh`, `smoke-test.sh`, `backup.sh`) use the project name from `.env`.
+
 ## Pointing the ESP32 at the new server
 
 The firmware default is still the Hetzner address. Set the broker URL with

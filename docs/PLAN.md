@@ -2,7 +2,7 @@
 
 Extension and deployment plan for MicroHydros: an Angular app, AI suggestions, a parallel Node-RED flow and a portable deployment.
 
-**Author:** BasitMN   **Written:** 2026-09-19   **Revised:** 2026-09-19 after the live server check   **Status:** plan. Phase D1 files written on branch `deploy` and statically checked, not yet run on Docker. Nothing else implemented
+**Author:** BasitMN   **Written:** 2026-09-19   **Revised:** 2026-09-19 after the live server check   **Status:** plan. Phases D1 and D1b written on branch `deploy` and statically checked, not yet run on Docker. Nothing else implemented
 
 The original MicroHydros stack (PR #16) is not changed by this plan. LeafLimits lives in its own private repository, `BasitMN/leaflimits-ai`. Its `main` branch is an exact copy of the PR #16 branch, and the work happens on other branches.
 
@@ -140,7 +140,7 @@ What already helps: image versions are pinned and multi-arch (ARM to x86 works),
 | D4 | Firmware | Change the broker default to a hostname such as `mqtt://hydro.<domain>:8883`. Reflash once. Workplace WiFi credentials set through menuconfig. The current setup supports WPA2-PSK only, not WPA2-Enterprise | Moving servers means a DNS change, with no reflash |
 | D5 | Proof | Run the D1 commands at stage E1 (your own machine). Then run at E2 (the existing Hetzner server) after the deadline. E3 (throwaway VM, deleted afterwards) is optional and not planned | The smoke test passes on a machine that never saw the project |
 
-**Progress on D1 (branch `deploy`):** the env-driven `compose.yaml`, the seeded `flows.json` (built by `scripts/build-seed-flows.py`), `settings.js`, `.env.example`, `.gitattributes`, `deploy.sh`, `smoke-test.sh`, `backup.sh`, the password-hash helper and `docs/DEPLOYMENT.md` are written and statically checked. Not yet run against Docker. `restore.sh` is still missing.
+**Progress on D1 (branch `deploy`):** the env-driven `compose.yaml`, the seeded `flows.json` (built by `scripts/build-seed-flows.py`), `settings.js`, `.env.example`, `.gitattributes`, `deploy.sh`, `smoke-test.sh`, `backup.sh`, the password-hash helper and `docs/DEPLOYMENT.md` are written and statically checked. Not yet run against Docker. `restore.sh` is still missing. **D1b** (project name, container names and memory limits from `.env`, plus a container-name check in `deploy.sh`) is written and statically checked.
 
 Data migration is optional. Starting fresh is simplest. To keep history, run `influx backup` on Hetzner and restore at the new server. Grafana needs nothing, because its dashboards are provisioned.
 

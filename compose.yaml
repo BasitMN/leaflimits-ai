@@ -7,12 +7,14 @@
 #   ./scripts/smoke-test.sh
 #
 # The running Hetzner server still uses docker/compose.hetzner.yaml, which is unchanged.
+# The project name prefixes container, volume and network names. Set COMPOSE_PROJECT_NAME in .env
+# to run a second copy next to another stack on the same host.
 name: microhydros
 
 services:
   mosquitto:
     image: eclipse-mosquitto:2
-    container_name: microhydros-mosquitto
+    container_name: ${COMPOSE_PROJECT_NAME:-microhydros}-mosquitto
     ports:
       - "${MQTT_BIND:-0.0.0.0}:${MQTT_PORT:-1883}:1883"
     volumes:
@@ -22,10 +24,11 @@ services:
     networks:
       - microhydros-network
     restart: unless-stopped
+    mem_limit: ${MOSQUITTO_MEM:-128m}
 
   node-red:
     image: nodered/node-red:5.0.7
-    container_name: microhydros-node-red
+    container_name: ${COMPOSE_PROJECT_NAME:-microhydros}-node-red
     # First start only: copy the seed flows (validation + storage) into an empty /data volume.
     # After that the flows in the volume are used, so edits made in the editor are kept.
     entrypoint: ["/bin/sh", "-c", "[ -f /data/flows.json ] || cp /seed/flows.json /data/flows.json; exec ./entrypoint.sh"]
@@ -50,10 +53,11 @@ services:
       - mosquitto
       - influxdb
     restart: unless-stopped
+    mem_limit: ${NODERED_MEM:-512m}
 
   influxdb:
     image: influxdb:2.9.1
-    container_name: microhydros-influxdb
+    container_name: ${COMPOSE_PROJECT_NAME:-microhydros}-influxdb
     ports:
       - "${INFLUX_BIND:-0.0.0.0}:${INFLUX_PORT:-8086}:8086"
     volumes:
@@ -69,10 +73,11 @@ services:
     networks:
       - microhydros-network
     restart: unless-stopped
+    mem_limit: ${INFLUX_MEM:-1g}
 
   grafana:
     image: grafana/grafana:13.2.1
-    container_name: microhydros-grafana
+    container_name: ${COMPOSE_PROJECT_NAME:-microhydros}-grafana
     ports:
       - "${GRAFANA_BIND:-0.0.0.0}:${GRAFANA_PORT:-3000}:3000"
     volumes:
@@ -90,6 +95,7 @@ services:
     depends_on:
       - influxdb
     restart: unless-stopped
+    mem_limit: ${GRAFANA_MEM:-512m}
 
 networks:
   microhydros-network:
