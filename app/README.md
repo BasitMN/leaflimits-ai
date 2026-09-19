@@ -12,7 +12,7 @@ Status: **first version, built and unit tested against a mock backend.** The Nod
 | Screen | Purpose |
 |--------|---------|
 | Current  | Active plant, limits and the latest value per sensor with an in-range / too low / too high chip. Refreshes every 5 s |
-| Photo    | Camera capture, shrunk to a 1024 px JPEG on the phone, then sent for an AI suggestion |
+| Photo    | Take a photo with the camera or choose an existing one (gallery or files, or drag and drop on a computer). It is checked, shrunk to a 1024 px JPEG on the phone, then sent for an AI suggestion |
 | Review   | Editable min/max per sensor (min < max, inside the sensor's plausible range), then Save |
 | Settings | Access token and device id, kept in this browser only |
 
@@ -42,7 +42,7 @@ fake API returns a Basil suggestion after 1.5 s and simulated readings. `?mock=0
 ```bash
 cd app
 npm install --legacy-peer-deps
-npx ng test --watch=false              # 15 unit tests (validation, classification, image scaling)
+npx ng test --watch=false              # unit tests (validation, classification, image scaling and file checks)
 npx ng build --base-href /leaflimits/  # output in dist/leaflimits-app/browser
 ```
 
