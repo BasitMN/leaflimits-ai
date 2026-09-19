@@ -30,3 +30,6 @@ flows_cred.json
 node_modules/
 .angular/
 .claude/
+
+# Backups contain secrets
+backups/

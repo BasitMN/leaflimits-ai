@@ -2,7 +2,7 @@
 
 Extension and deployment plan for MicroHydros: an Angular app, AI suggestions, a parallel Node-RED flow and a portable deployment.
 
-**Author:** BasitMN   **Written:** 2026-09-19   **Revised:** 2026-09-19 after the live server check   **Status:** plan, nothing implemented
+**Author:** BasitMN   **Written:** 2026-09-19   **Revised:** 2026-09-19 after the live server check   **Status:** plan. Phases D1 and D1b written on branch `deploy` and statically checked, not yet run on Docker. Nothing else implemented
 
 The original MicroHydros stack (PR #16) is not changed by this plan. LeafLimits lives in its own private repository, `BasitMN/leaflimits-ai`. Its `main` branch is an exact copy of the PR #16 branch, and the work happens on other branches.
 
@@ -73,7 +73,7 @@ Isolation rules for the add-on mode:
 | Repository | `git@github.com:BasitMN/leaflimits-ai.git` (private) |
 | `main` | Exact copy of `feature/esp32s3-firmware` (PR #16), same commit IDs |
 | `app` | The LeafLimits plan and the `app/` folder for the Angular app |
-| `deploy` (planned) | Portable deployment work from section 9 |
+| `deploy` | Portable deployment work from section 9 (phase D1 in progress) |
 | Commit identity | `BasitMN <43453765+BasitMN@users.noreply.github.com>` |
 | Team repository | Not a remote of this repository, and never pushed to from here |
 
@@ -134,12 +134,33 @@ What already helps: image versions are pinned and multi-arch (ARM to x86 works),
 | # | Phase | Work | Done when |
 |---|---|---|---|
 | D1 | One-command deploy | One compose file driven by `.env` (ports, bind addresses, Node-RED login). Flows combined into one `flows.json` that is seeded on first start, with the storage tab enabled and the test inject removed. Complete `.env.example`. `.gitattributes` with LF endings. `scripts/deploy.sh` (checks Docker, ports, RAM, `.env`), `scripts/smoke-test.sh`, `scripts/backup.sh` and `restore.sh` | A clean machine runs `git clone`, `cp .env.example .env`, `./scripts/deploy.sh`, `./scripts/smoke-test.sh` with no manual clicks |
+| D1b | Co-existence | Container names and the project name come from `.env`, and memory limits per service come from `.env`, so two copies of the stack can run on one host | Two projects run side by side without clashes and each stays under its limit |
 | D2 | Hardening | Mosquitto password file and ACLs (publish-only user for the ESP32, own user for Node-RED). InfluxDB write-only token for Node-RED and read-only token for Grafana. Web UIs bound to `127.0.0.1` behind a Caddy reverse proxy. `ufw` on, with only the MQTT and HTTPS ports open | Anonymous publish is refused and the UIs are not reachable directly |
 | D3 | LeafLimits in the deploy | Multi-stage Dockerfile builds the Angular app into the LeafLimits Node-RED image, so the server needs no Node.js. `ANTHROPIC_API_KEY` and the API token go in `.env`. Relative API URLs | `docker compose up -d --build` starts everything |
 | D4 | Firmware | Change the broker default to a hostname such as `mqtt://hydro.<domain>:8883`. Reflash once. Workplace WiFi credentials set through menuconfig. The current setup supports WPA2-PSK only, not WPA2-Enterprise | Moving servers means a DNS change, with no reflash |
-| D5 | Proof | Run the D1 commands on a throwaway server (for example a small Hetzner Cloud VM, deleted afterwards) | The smoke test passes on a machine that never saw the project |
+| D5 | Proof | Run the D1 commands at stage E1 (your own machine). Then run at E2 (the existing Hetzner server) after the deadline. E3 (throwaway VM, deleted afterwards) is optional and not planned | The smoke test passes on a machine that never saw the project |
+
+**Progress on D1 (branch `deploy`):** the env-driven `compose.yaml`, the seeded `flows.json` (built by `scripts/build-seed-flows.py`), `settings.js`, `.env.example`, `.gitattributes`, `deploy.sh`, `smoke-test.sh`, `backup.sh`, the password-hash helper and `docs/DEPLOYMENT.md` are written and statically checked. Not yet run against Docker. `restore.sh` is still missing. **D1b** (project name, container names and memory limits from `.env`, plus a container-name check in `deploy.sh`) is written and statically checked.
 
 Data migration is optional. Starting fresh is simplest. To keep history, run `influx backup` on Hetzner and restore at the new server. Grafana needs nothing, because its dashboards are provisioned.
+
+### Where to build and test
+
+The order is: this phone (E0), your PC (E1), then the existing Hetzner server (E2). Work moves up this ladder one stage at a time. A stage is finished when `./scripts/smoke-test.sh` passes there (E0 has no stack, so its exit criterion is that the static checks and unit tests pass).
+
+| Stage | Where | What runs there | Risk to the live system | Enter when |
+|---|---|---|---|---|
+| E0 | This phone (Termux), no Docker | Static checks (YAML, shell syntax, JSON wiring), unit tests of the limits evaluation function in plain JS, Angular build if Node allows | None | Now |
+| E1 | Your PC, with Docker | The full stack from a clean clone with default ports. Real `deploy.sh` and `smoke-test.sh`. The telemetry simulator can run against this local broker. LeafLimits and the Angular dev server are built and tested here | None | Docker (Desktop or Engine) with Compose v2 is installed on the PC |
+| E2 | The existing Hetzner server, as a second project | Same stack in its own folder, on free ports (for example 1882, 1885, 3003, 8088), with memory limits and no container-name clash. LeafLimits runs as an add-on that subscribes to the live broker | Low but real: about 2.6 GB free RAM is shared with the live stacks | After the 25 September deadline and demo, and E1 has passed |
+| E3 | A throwaway Hetzner Cloud VM (optional, not planned) | Clean-machine proof of D1 to D3, then the VM is deleted. About EUR 0.02 for a short test | None | Only if you later want the extra clean-machine proof |
+
+Rules:
+
+- Build and iterate on E0 and E1 only.
+- Until the deadline and demo, the live server is only read from. The one allowed change is re-enabling the storage tab.
+- Creating a cloud resource, or changing anything on the live server, needs explicit approval each time.
+- Move to the next stage only when the previous one passes.
 
 ### Workplace checklist
 
@@ -153,16 +174,16 @@ Data migration is optional. Starting fresh is simplest. To keep history, run `in
 
 ## 10. Build phases for LeafLimits
 
-| # | Work | Done when |
-|---|---|---|
-| 0 | Server check (done, see section 3) | Numbers known |
-| 1 | Create bucket `microhydros_extra` with a scoped write token | Test write succeeds |
-| 2 | New compose project and Node-RED with the evaluation flow, on free ports | New bucket fills while the old bucket's count is unchanged |
-| 3 | Limits endpoints, tested with `curl` | A PUT changes the state of the next reading |
-| 4 | AI endpoint with schema and rate limit | A test photo returns valid JSON |
-| 5 | Grafana dashboard: values, threshold lines, state history | Lines move when limits change |
-| 6 | Angular app | Photo, edit, save, and Grafana updates |
-| 7 | HTTPS via reverse proxy, README and demo script | Works from the phone |
+| # | Work | Where | Done when |
+|---|---|---|---|
+| 0 | Server check (done, see section 3) | Live server, read-only | Numbers known |
+| 1 | Create bucket `microhydros_extra` with a scoped write token | E1 first, E2 after the deadline | Test write succeeds |
+| 2 | New compose project and Node-RED with the evaluation flow, on free ports | E1 first, E2 after the deadline | New bucket fills while the old bucket's count is unchanged (E2) |
+| 3 | Limits endpoints, tested with `curl` | E0 and E1 | A PUT changes the state of the next reading |
+| 4 | AI endpoint with schema and rate limit | E1 | A test photo returns valid JSON |
+| 5 | Grafana dashboard: values, threshold lines, state history | E1 | Lines move when limits change |
+| 6 | Angular app | E0 and E1 | Photo, edit, save, and Grafana updates |
+| 7 | HTTPS via reverse proxy, README and demo script | E2 or E3 | Works from the phone |
 
 ## 11. Risks
 
@@ -172,7 +193,7 @@ Data migration is optional. Starting fresh is simplest. To keep history, run `in
 | Wrong plant identification from a photo | Mandatory human review, confidence shown, optional growth-stage and setup fields |
 | Shared Hetzner server is tight on RAM (about 2.6 GB free, six other containers) | Memory limits on the new containers, and watch usage in phase 2 |
 | Simulator data pollutes the real bucket | Do not run the simulator against the live broker. Unit-test the evaluation function as plain JS |
-| Live-system changes in phases 1 and 2 | Only with explicit go-ahead. Bucket creation is non-destructive and the container is separate |
+| Live-system changes in phases 1 and 2 | Built and tested locally at E1 first. Live changes only at E2, after the deadline, with explicit go-ahead |
 | Camera and mixed-content limits over plain HTTP | One origin for app and API, HTTPS in phase 7 |
 | API cost abuse | Token auth plus rate limit |
 | Public anonymous MQTT and open ports | Hardening phase D2 |
@@ -181,6 +202,7 @@ Data migration is optional. Starting fresh is simplest. To keep history, run `in
 ## 12. Open items
 
 - **Re-enable the "InfluxDB storage" tab on the live server.** It was disabled by mistake. This is a one-click change in the Node-RED editor, and I have not made it.
+- Confirm the PC (stage E1) has Docker with Compose v2, about 1 GB free RAM and the default ports free.
 - Confirm the DS18B20 ROM pinning (water vs external probe) is finished.
 - Decide whether the extension stays personal or is offered to the team as a PR after the deadline.
 - Get workplace permission before any work there (section 9 checklist).
