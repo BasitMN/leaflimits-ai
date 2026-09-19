@@ -92,6 +92,37 @@ Everything below touches only Node-RED and its own data folder. Mosquitto, Influ
 
 The storage tab ("InfluxDB storage") must be enabled for readings to reach InfluxDB. That is independent of this tab.
 
+## Try it locally before touching the server (demo runner)
+
+`dev/demo.js` starts a private copy of the pipeline that lives only on the machine it runs on: an in-process MQTT broker
+(no connection to any real server), Node-RED with the MQTT Validation flow and this tab already enabled, the Angular app at
+`http://localhost:1880/leaflimits/` and a fake device that sends a reading every 5 seconds. The water temperature swings
+between about 17 and 27 C every 2 minutes, so alerts fire once limits are set.
+
+```bash
+bash docker/node-red/leaflimits/dev/setup-demo.sh    # once: installs Node-RED, the broker and builds the app (about 3 min)
+bash docker/node-red/leaflimits/dev/start-demo.sh    # start in the background
+bash docker/node-red/leaflimits/dev/stop-demo.sh
+```
+
+Open the app, enter the token `demo` under Settings, and use the device `esp32s3-01`. Limits saved in the app live only while
+the runner runs. Logs are in `/tmp/leaflimits-demo/` (`demo.out`, `node-red.log`). Everything is installed under
+`$LL_DEMO_HOME` (default `/tmp/leaflimits-demo`), never inside the repo.
+
+**Real AI.** If the file `/root/ws/.anthropic_key` exists, the runner uses the real Claude API, otherwise a fake answer. Create the file
+without putting the key in the chat or in shell history:
+
+```bash
+read -rs -p "Anthropic key: " K; printf %s "$K" > /root/ws/.anthropic_key; chmod 600 /root/ws/.anthropic_key
+```
+
+The runner reads the file when it starts, so restart it after creating or changing the key. The key is handed to Node-RED only through
+its process environment: it is never written to `flows.json`, a log or any other file, and never printed. Each suggestion is one
+paid API request, and the tab limits them to 20 per hour.
+
+Other settings (environment variables): `LL_DEMO_KEY_FILE`, `LL_DEMO_TOKEN`, `LL_DEMO_DEVICE`, `LL_DEMO_PORT`, `LL_DEMO_INTERVAL_MS`,
+`LL_DEMO_PERIOD_S`, `LL_DEMO_HOME`, `LL_DEMO_MODULES`, `LL_DEMO_APP_DIR`.
+
 ## Where the live flows live, and rebuilding
 
 The live Node-RED on Hetzner is not linked to any git repository. `/root/microhydros` is a one-time copy of the files, and
