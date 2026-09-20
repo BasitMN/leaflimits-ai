@@ -15,14 +15,14 @@ How the three Node-RED tabs of MicroHydros are built, node by node, and how they
 | 3 | Before you start: two ways to get the flows |
 | 4 | Tab 1: MQTT Validation |
 | 5 | Tab 2: InfluxDB storage (step by step, in detail) |
-| 6 | Tab 3: LeafLimits (four sections) |
+| 6 | Tab 3: LeafLimits (step by step, in detail) |
 | 7 | How the tabs work together |
 | 8 | Configuration and secrets |
 | 9 | The build pipeline of the LeafLimits tab |
 | 10 | Troubleshooting |
 | 11 | Recipe: add a new sensor |
 | 12 | Glossary |
-| A, B | Appendix: the complete code of the two team functions |
+| A, B, C | Appendix: the complete code of every function |
 
 ---
 
@@ -143,7 +143,7 @@ The `+` in a topic is a wildcard for exactly one level, so `devices/+/telemetry/
 | `microhydros/v1/devices/{id}/limits/config` | Tab 3 (API save) | Tab 3 | **yes** |
 | `microhydros/v1/devices/{id}/limits/alert` | Tab 3 | Anyone (future) | no |
 
-*Retained* means the broker keeps the last message on that topic and hands it to every new subscriber immediately. Tab 3 uses that as its database for the limits (section 6.3).
+*Retained* means the broker keeps the last message on that topic and hands it to every new subscriber immediately. Tab 3 uses that as its database for the limits (section 6.4).
 
 ## 2.2 The measurements
 
@@ -530,157 +530,585 @@ Grafana has a data source pointing at `http://influxdb:8086` (Flux language, the
 
 ---
 
-# 6. Tab 3: LeafLimits
+# 6. Tab 3: LeafLimits (step by step)
 
-**Job:** know the healthy range for each plant, tell when a reading leaves it, and serve a small web app with an AI helper for setting the limits from a photo.
+**Job:** know the healthy range for each plant, tell when a reading leaves it, and serve a small web app with an AI helper that suggests limits from a plant photo.
 
-The tab is drawn in four sections, each headed by a comment node. The whole tab is **generated** from small source files (part 9), so the description below is what the generated flow contains: 39 items, 38 nodes plus the tab.
+This is the biggest tab: 38 nodes in four sections (plus four comment nodes as headings). It follows the same ideas as tabs 1 and 2 (listen, decide, publish, answer) and adds two new ones: **web routes** (the phone talks to Node-RED over HTTP) and **a shared toolkit** of code. Take one section at a time. Each section ends with a test, so you always know that what you built works before you go on.
 
-## 6.1 Section 1: evaluate readings
+| Section | Job | Nodes | Section in this guide |
+|---|---|---|---|
+| 1 | Compare every reading with the limits and raise alerts | 3 | 6.3 |
+| 2 | Remember the limits (stored on the broker) | 2 | 6.4 |
+| 3 | The HTTP API: read and save limits, live status, AI suggestion | 21 | 6.5 and 6.6 |
+| 4 | Serve the web app files | 8 | 6.7 |
+
+## 6.1 Before you build
+
+**Import or build by hand?** The tab is *generated* by `docker/node-red/leaflimits/build.js` (part 9). Importing `docker/node-red/flows/leaflimits.json` is the normal way. Build by hand only to learn, or to change something small. If you build by hand, every function node needs the same shared code, described in 6.2.
+
+**Step 1: create the tab.** Click **+** in the tab bar, double-click the new tab, name it `LeafLimits`.
+
+**Step 2: add the tab settings.** In the same dialog open **Environment Variables** and add these rows. Nothing else in the tab contains a secret.
+
+| Name | Type | Value | Used for |
+|---|---|---|---|
+| `LEAFLIMITS_TOKEN` | **credential** | a long random string you invent (48 hex characters is good) | The password of the API. The app sends it |
+| `ANTHROPIC_API_KEY` | **credential** | your key from the Anthropic console | Calling the AI |
+| `ANTHROPIC_MODEL` | string | `claude-sonnet-5` | Which model answers |
+| `ANTHROPIC_API_URL` | string | `https://api.anthropic.com/v1/messages` | Where to send it |
+| `SUGGEST_MAX_PER_HOUR` | number | `20` | Protects your bill |
+| `LEAFLIMITS_APP_DIR` | string | `/data/leaflimits-app` | Where the web app files are |
+
+Generate a token in a terminal with `openssl rand -hex 24`. Never paste it or the AI key into a chat, a ticket or a commit.
+
+> Keep the tab **disabled** while you build (double-click the tab, tick *Disabled*). Then nothing you draw can touch a running system. Enable it at the end (6.8).
+
+**Step 3: check the broker connection.** All mqtt nodes here use the same *Local Mosquitto* configuration node as tabs 1 and 2 (section 3.3). Never create a second one.
+
+## 6.2 The shared toolkit `LL`
+
+Every function in this tab starts with the same block of code, `src/common.js` (appendix C). It defines one object called `LL` with small helpers. Node-RED function nodes cannot import files, so the build script pastes the block into each of them. Understanding these helpers makes every other function easy to read.
+
+| Helper | What it does | Why it exists |
+|---|---|---|
+| `LL.MEASUREMENTS` | The four sensors with label and hard limits (`hardMin`, `hardMax`) | One list that says what a sensor can measure. Limits must stay inside |
+| `LL.DEVICE_RE` | Rule for a valid device id: starts with a letter or digit, then letters, digits, `_` or `-`, at most 64 characters | The id ends up in MQTT topics and in file-like keys. Names such as `__proto__` are impossible |
+| `LL.known(key)` | Is this a known sensor name? | Rejects unknown names |
+| `LL.own(obj, key)` | Reads `obj[key]` only if the object really has it | Protects against tricks with special names |
+| `LL.parseJson(x)` | Turns a string or Buffer into an object, or gives `undefined` | MQTT payloads arrive as text or bytes |
+| `LL.parseProfile(body, device)` | Strictly checks a limits profile. One problem rejects it all | The gate for both the API and the retained message |
+| `LL.checkRange(key, r)` | Checks `min` and `max` for one sensor | Numbers, `min < max`, inside the hard range |
+| `LL.classify(value, range)` | `low`, `high`, `ok` or `unknown` for one value | The basic comparison |
+| `LL.step(prev, value, range)` | One step of the state machine (6.3) | Streaks and hysteresis |
+| `LL.resetStates(states, device)` | Sets every sensor of a device back to `unknown` but keeps its latest value | New limits mean a fresh start |
+| `LL.reply(msg, status, body)` | Fills in `statusCode`, `payload` and safe headers, returns the message | Every answer to the phone looks the same |
+| `LL.auth(msg, env)` | Checks the bearer token. Returns `null` (allowed) or the error reply | Guards every API route |
+| `LL.sameToken(a, b)` | Compares two strings in constant time | The answer time does not reveal how many characters were right |
+| `LL.device(msg)` | Reads and validates `:device` from the URL | Same check in every route |
+| `LL.defaultProfile(device)` | An empty profile | What a device with no limits looks like |
+| `LL.SCHEMA_VERSION`, `ENTER_COUNT`, `EXIT_COUNT`, `HYSTERESIS` | Constants | Change the behaviour in one place |
+
+**The wrapper around each function.** Each function node contains, from top to bottom: a comment line, the `LL` block, then the node's own code inside `try { ... } catch (e) { ... }`. The catch makes a bug harmless. For the nodes that answer a web request it logs the error and replies `500 Internal error.` so the phone never hangs. For the two MQTT functions it only logs the error.
+
+```javascript
+// ---- what one function node contains ----
+<the whole LL block from src/common.js>
+
+try {
+    <the code of the node, for example src/evaluate.fn.js>
+} catch (e) {
+    node.error(e, msg);
+    const r = LL.reply(msg, 500, { message: 'Internal error.' });
+    return r;            // nodes with two outputs: return [null, r];
+}
+```
+
+## 6.3 Section 1: evaluate every reading
+
+**Idea:** every validated reading is compared with the limits of its device. Only a *change* of state produces a message, so a steady value is silent.
 
 ![Sections 1 and 2 of the LeafLimits tab](figures/nodered-guide/nr-lleval.png)
 
+### Build it
+
 | # | Node | Type | Settings |
 |---|---|---|---|
-| 1 | Validated readings | mqtt in | Topic `.../telemetry/validated/+`, QoS 1 |
-| 2 | Evaluate against limits | function | Source `src/evaluate.fn.js` |
-| 3 | Publish limit alert | mqtt out | Topic from `msg.topic`, QoS 1 |
+| 1 | Validated readings | mqtt in | Server *Local Mosquitto*, topic `microhydros/v1/devices/+/telemetry/validated/+`, QoS 1, output *auto-detect* |
+| 2 | Evaluate against limits | function | Outputs **1**, code `LL` block + `evaluate.fn.js` |
+| 3 | Publish limit alert | mqtt out | Topic **empty**, QoS **empty**, Retain **empty**, server *Local Mosquitto* |
 
-Wires: 1 to 2 to 3. The function returns `null` unless the state **changed**, so a steady reading sends nothing.
+Wires: 1 to 2 to 3. Add a **comment** node above with the text `1. Evaluate readings against the limits`.
 
-### The state machine
+Why are topic, QoS and retain empty in node 3? The function fills in `msg.topic`, `msg.qos` and `msg.retain` for each alert, and the mqtt out node uses those when its own fields are empty. An object in `msg.payload` is turned into JSON automatically.
 
-Every sensor of every device has one of these states.
+### The function, block by block
+
+**Block 1: read and check the reading.**
+
+```javascript
+const r = LL.parseJson(msg.payload);
+if (!r || typeof r !== 'object') return null;
+const device = r.device_id;
+const key = r.measurement;
+const value = r.value;
+if (typeof device !== 'string' || !LL.DEVICE_RE.test(device) || typeof key !== 'string'
+    || !LL.known(key) || typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+}
+```
+
+Anything unusual is ignored silently (`return null`). The topic `.../validated/+` is open to anyone who can publish, so the code trusts nothing.
+
+**Block 2: fetch the limits and the previous state.**
+
+```javascript
+const profile = LL.own(flow.get('ll_profiles') || {}, device);
+const range = profile && profile.limits ? LL.own(profile.limits, key) : undefined;
+const states = flow.get('ll_state') || {};
+const id = device + '/' + key;
+const prev = LL.own(states, id) || { state: 'unknown', streak: 0 };
+```
+
+`flow.get('ll_profiles')` holds the limits of all devices, `flow.get('ll_state')` the state of every sensor under the key `device/measurement`, for example `esp32s3-01/water_temperature`. `range` is `{min, max}` or `undefined` when no limit is set for this sensor.
+
+**Block 3: run the state machine and remember the result.**
+
+```javascript
+const result = LL.step(prev, value, range);
+states[id] = Object.assign({}, result.entry, { value, unit: r.unit, timestamp });
+flow.set('ll_state', states);
+if (!result.changed) return null;
+```
+
+`LL.step` returns the new state and a flag `changed`. The state and the latest value are always saved, because the app's status page reads them. But only a change continues to the alert.
+
+**Block 4: build the alert.** It returns a message with `topic`, `qos: 1`, `retain: false` and the payload shown in 6.3.3.
+
+### 6.3.1 The state machine
+
+![The four states and what moves between them](figures/nodered-guide/nr-ll-state.png)
 
 | State | Meaning |
 |---|---|
-| `unknown` | No limits known, or the limits were just changed |
-| `ok` | Inside the range |
-| `low` | Below the minimum |
-| `high` | Above the maximum |
+| `unknown` | No limits set for this sensor, or the limits were just changed |
+| `ok` | Between min and max |
+| `low` | Below min for long enough |
+| `high` | Above max for long enough |
 
-To stop a single odd reading from triggering an alert, three constants decide:
-
-| Constant | Value | Meaning |
+| Constant | Value | Effect |
 |---|---|---|
-| `ENTER_COUNT` | 3 | Three readings in a row out of range before `low`/`high` is raised (about 15 s at a 5 s interval) |
-| `EXIT_COUNT` | 2 | Two readings in a row back inside before it returns to `ok` |
-| `HYSTERESIS` | 0.02 | A value must move 2 % of the range back inside first, so a value hovering on the limit does not flicker |
+| `ENTER_COUNT` | 3 | Three readings in a row on the wrong side before `low` or `high` (about 15 s at a 5 s interval) |
+| `EXIT_COUNT` | 2 | Two readings in a row back inside before returning to `ok` |
+| `HYSTERESIS` | 0.02 | A value must be 2 % of (max minus min) inside the limit to count as "back inside" |
 
-The function keeps two things in `flow` memory: `ll_profiles` (the limits per device) and `ll_state` (the latest value and state per sensor). Alerts go to `microhydros/v1/devices/{id}/limits/alert` and look like this:
+### 6.3.2 A worked example
+
+Limits for the water: min 18, max 24. The range is 6, so the hysteresis band is 0.12. That means a value must be below 23.88 to leave `high`.
+
+| Time | Value | Wanted state | Streak | State after | Alert? |
+|---|---|---|---|---|---|
+| 1 | 22.0 | ok | 0 | ok | no (first reading, starts from ok) |
+| 2 | 24.5 | high | 1 of 3 | ok | no |
+| 3 | 24.6 | high | 2 of 3 | ok | no |
+| 4 | 22.0 | ok | reset to 0 | ok | no (the odd values are forgotten) |
+| 5 | 24.5 | high | 1 of 3 | ok | no |
+| 6 | 24.7 | high | 2 of 3 | ok | no |
+| 7 | 25.0 | high | **3 of 3** | **high** | **yes: ok to high** |
+| 8 | 23.95 | still high (inside the hysteresis band) | 0 | high | no |
+| 9 | 23.5 | ok | 1 of 2 | high | no |
+| 10 | 23.4 | ok | **2 of 2** | **ok** | **yes: high to ok** |
+
+Rows 4 and 8 are the two protections at work. Row 4 is the streak, row 8 is the hysteresis.
+
+### 6.3.3 The alert message
+
+Topic `microhydros/v1/devices/{id}/limits/alert`:
 
 ```json
 { "schema_version": 1, "device_id": "esp32s3-01", "measurement": "water_temperature",
-  "state": "high", "previous_state": "ok", "value": 24.7, "unit": "celsius",
+  "state": "high", "previous_state": "ok", "value": 25.0, "unit": "celsius",
   "limit": { "min": 18, "max": 24 }, "timestamp": "2026-09-20T09:00:00.000Z" }
 ```
 
-## 6.2 Section 2: limits storage
+Nothing subscribes to alerts yet. They are for later (a push message, a Grafana annotation).
+
+### 6.3.4 Test section 1
+
+Section 2 stores the limits, so for this test we set them first (this is the format of section 2, explained in 6.4). Use a made-up device `leaf-test`.
+
+```bash
+# 1. Publish limits as a retained message
+mosquitto_pub -h localhost -p 1884 -q 1 -r -t microhydros/v1/devices/leaf-test/limits/config \
+  -m '{"plant":"Basil","source":"manual","limits":{"water_temperature":{"min":18,"max":24}}}'
+
+# 2. In a second terminal, watch the alerts
+mosquitto_sub -h localhost -p 1884 -v -t 'microhydros/v1/devices/leaf-test/limits/alert'
+
+# 3. Send one ok reading and three high readings
+for v in 22 24.5 24.6 25.0; do
+  mosquitto_pub -h localhost -p 1884 -q 1 \
+    -t microhydros/v1/devices/leaf-test/telemetry/validated/water_temperature \
+    -m "{\"device_id\":\"leaf-test\",\"measurement\":\"water_temperature\",\"value\":$v,\"unit\":\"celsius\",\"timestamp\":\"$(date -u +%FT%T.000Z)\"}"
+done
+```
+
+The second terminal shows **one** alert after the third high value (`ok` to `high`), and none before. Send `23 23` and you get the return alert (`high` to `ok`).
+
+## 6.4 Section 2: remember the limits
+
+**Idea:** the limits live in one place that survives everything: a **retained MQTT message** on the broker. When Node-RED starts, it subscribes and the broker hands over that message at once, so no extra database is needed.
+
+### Build it
 
 | # | Node | Type | Settings |
 |---|---|---|---|
-| 4 | Limits profile (retained) | mqtt in | Topic `microhydros/v1/devices/+/limits/config`, QoS 1 |
-| 5 | Store profile in memory | function | Source `src/config-store.fn.js` |
+| 4 | Limits profile (retained) | mqtt in | Topic `microhydros/v1/devices/+/limits/config`, QoS 1, *auto-detect* |
+| 5 | Store profile in memory | function | Outputs **0**, code `LL` block + `config-store.fn.js` |
 
-Wire: 4 to 5. The function has **no output**; it writes the profile into `flow` memory `ll_profiles` and resets the sensor states of that device, because new limits mean a fresh start.
+One wire: 4 to 5. The function has no output. It only writes to memory.
 
-The clever part is that the durable copy of the limits is a **retained MQTT message** on the broker. When Node-RED restarts, the broker delivers that retained message again the moment this node subscribes, so the memory refills by itself. No database is needed for limits. An empty retained message deletes the profile.
+### The function, step by step
 
-## 6.3 Section 3: the HTTP API
+1. It takes the device id from the topic: `msg.topic.split('/')[3]` (the fourth part: `microhydros`, `v1`, `devices`, **id**). A bad id ends here.
+2. It reads the payload as text. If it is **empty**, it deletes the profile of that device. (Publishing an empty retained message is how MQTT deletes a retained message.)
+3. Otherwise it parses the JSON and calls `LL.parseProfile`. If the text is not JSON or breaks a rule, it logs a warning (`node.warn`) and keeps the old profile.
+4. It stores the clean profile in `ll_profiles`, keeps `updated_at` if present, and calls `LL.resetStates`, so the sensors of this device restart from `unknown`.
 
-The phone app talks to Node-RED through four routes.
+### The profile format
 
-| Method | Path | Answers with |
+```json
+{
+  "device_id": "esp32s3-01",
+  "plant": "Basil",
+  "source": "manual",
+  "updated_at": "2026-09-20T09:00:00.000Z",
+  "limits": {
+    "water_temperature":    { "min": 18, "max": 24 },
+    "internal_humidity":    { "min": 40, "max": 70 }
+  }
+}
+```
+
+The rules of `LL.parseProfile` (one broken rule rejects the whole profile):
+
+| Field | Rule | Error text |
 |---|---|---|
-| GET | `/leaflimits/api/limits/:device` | The saved limits of one device |
-| PUT | `/leaflimits/api/limits/:device` | Saves new limits (and publishes them retained) |
-| GET | `/leaflimits/api/status/:device` | Latest value, unit, state and age of each sensor |
-| POST | `/leaflimits/api/suggest` | Limits suggested by the AI from a plant photo |
+| body | A JSON object | `The body must be a JSON object.` |
+| `plant` | Text, at most 60 characters (may be missing) | `plant must be text of at most 60 characters` |
+| `limits` | An object (may be missing) | `limits must be an object` |
+| each key in `limits` | One of the four sensor names | `unknown measurement "..."` |
+| `min`, `max` | Finite numbers | `<sensor>: min and max must be numbers` |
+| `min`, `max` | `min` smaller than `max` | `<sensor>: min must be lower than max` |
+| `min`, `max` | Inside the hard range of the sensor (table in 2.2) | `<sensor>: must stay between 0 and 50` |
+| `source` | `ai` or anything else becomes `manual` | |
 
-`:device` in a path is a placeholder. Node-RED gives you the real value in `msg.req.params.device`.
+### Test section 2
 
-### 6.3.1 How an HTTP request is handled
+```bash
+# Is the retained message on the broker? (it arrives immediately)
+mosquitto_sub -h localhost -p 1884 -v -C 1 -t microhydros/v1/devices/leaf-test/limits/config
+
+# Delete it again
+mosquitto_pub -h localhost -p 1884 -r -n -t microhydros/v1/devices/leaf-test/limits/config
+```
+
+The real proof is a restart. In the editor make a small change and use *Full* deploy, or restart the container. The limits are back within a second, because the broker sends the retained message again. The sensor states are empty for a few seconds and fill again from the next readings.
+
+## 6.5 Section 3: the HTTP API
+
+**Idea:** the phone app cannot speak MQTT, so Node-RED offers four web routes. Every route follows the same chain, and every chain ends in a reply.
+
+| Method | Path | Answers with | Chain |
+|---|---|---|---|
+| GET | `/leaflimits/api/limits/:device` | The saved profile of a device (an empty one if none) | http in, Check token, Read profile, Reply |
+| PUT | `/leaflimits/api/limits/:device` | Saves a profile, answers with what was saved | http in, Check token, Validate and save profile, (mqtt out) and Reply |
+| GET | `/leaflimits/api/status/:device` | Latest value, unit, state and age of every sensor | http in, Check token, Latest values and state, Reply |
+| POST | `/leaflimits/api/suggest` | AI limits from a photo (6.6) | http in, Check token, Prepare AI request, Claude API, Clean AI answer, Reply |
+
+`:device` is a placeholder. Node-RED puts the real value in `msg.req.params.device`, which `LL.device(msg)` reads and validates.
+
+### 6.5.1 How a web request travels
 
 ![The life of a web request in Node-RED](figures/nodered-guide/nr-lifecycle.png)
 
-Three rules for every API route:
+1. **http in** creates the message and puts the request and a reply channel in it (`msg.req`, `msg.res`).
+2. Your nodes work on the message. **They must keep `msg.res`.** Changing `msg.payload` is fine. Building a brand-new message object loses the reply channel and the phone would wait forever.
+3. **http response** sends `msg.payload` with `msg.statusCode` and `msg.headers` back through `msg.res`.
+4. If nothing replies, the request **hangs** until the phone gives up. So every possible path must end in an http response.
 
-1. It **starts** with an **http in** node.
-2. It **ends** with an **http response** node. This is where the answer leaves.
-3. The **message must keep `msg.res`** all the way. Only that reply channel lets http response answer the right phone. If a function builds a brand-new message and forgets to copy it, no answer is sent and the phone waits until it gives up.
+`LL.reply(msg, status, body)` modifies the same `msg` object and returns it. That is why the functions can end with `return LL.reply(...)`.
 
-Also: if **nothing** replies, the request hangs. That is why each route ends in a Reply node on every path, including errors.
-
-### 6.3.2 The pattern used by every route
+### 6.5.2 The pattern shared by all routes
 
 ![Every route: http in, check token, handler, reply](figures/nodered-guide/nr-api.png)
 
-| Step | Node | What it does |
-|---|---|---|
-| a | http in | Receives the request |
-| b | Check token | Two outputs: output 1 continues, output 2 is a `401` reply |
-| c | Handler function | Does the work |
-| d | Reply | http response, sends `msg.payload` with `msg.statusCode` |
+The token check has two outputs: output 1 continues to the handler, output 2 goes straight to the reply with a `401` (or `503` if the server has no token configured). **Each route has its own Reply node.** Both the handler and the token check are wired into it, so every path ends in exactly one reply.
 
-**Check token** (`src/auth.fn.js`) compares the header `Authorization: Bearer <token>` with the tab setting `LEAFLIMITS_TOKEN`. Without the right token no route works.
+**Check token** in full (`auth.fn.js`):
 
-The PUT route has a handler with **two outputs**: output 1 publishes the limits as a retained MQTT message (mqtt out *Publish retained limits*, topic `.../limits/config`), output 2 is the reply. So one save changes memory immediately, stores the durable copy on the broker, and answers the phone.
-
-Every route's handler answers through one helper, `LL.reply(msg, status, body)`. It sets `msg.statusCode` and `msg.payload` and returns the message. All error paths therefore look the same to the app.
-
-### 6.3.3 Try the routes
-
-```bash
-TOKEN=...   # the value of LEAFLIMITS_TOKEN, never paste it into a chat or a file in git
-curl -s -H "Authorization: Bearer $TOKEN" http://localhost:1881/leaflimits/api/status/esp32s3-01
-
-curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"plant":"Basil","limits":{"water_temperature":{"min":18,"max":24}}}' \
-  http://localhost:1881/leaflimits/api/limits/esp32s3-01
+```javascript
+const denied = LL.auth(msg, env);
+return denied ? [null, denied] : [msg, null];
 ```
 
-Without the header you get `401`. A device id with strange characters gets `400`.
+`LL.auth` reads the header `Authorization: Bearer <token>`, compares it with `LEAFLIMITS_TOKEN` in constant time and returns `null` if it fits, otherwise the error reply. Constant time matters because a normal comparison stops at the first wrong character, and an attacker could measure how long it took.
 
-## 6.4 The AI suggestion route
+### 6.5.3 Build the GET limits route
+
+| # | Node | Type | Settings |
+|---|---|---|---|
+| a | GET limits | http in | Method **GET**, URL `/leaflimits/api/limits/:device`, accept file uploads off |
+| b | Check token | function | Outputs **2**, `LL` block + `auth.fn.js` |
+| c | Read profile | function | Outputs **1**, `LL` block + `get-limits.fn.js` |
+| d | Reply | http response | Status code empty, headers empty (they come from the message) |
+
+Wires: a to b, b **output 1** to c, c to d, b **output 2** to d.
+
+The handler is four lines: check the device id (`400` if bad), read `ll_profiles`, answer `200` with the profile or the default empty one.
+
+### 6.5.4 Build the PUT limits route
+
+| # | Node | Type | Settings |
+|---|---|---|---|
+| a | PUT limits | http in | Method **PUT**, URL `/leaflimits/api/limits/:device` |
+| b | Check token | function | Outputs 2, `auth.fn.js` |
+| c | Validate and save profile | function | Outputs **2**, `put-limits.fn.js` |
+| d | Publish retained limits | mqtt out | Topic, QoS and Retain **empty** (set by the message) |
+| e | Reply | http response | as before |
+
+Wires: a to b, b1 to c, b2 to e, c **output 1** to d, c **output 2** to e.
+
+What the handler does, in order:
+
+1. Validate the device id (`400` if bad).
+2. `LL.parseProfile(msg.payload, device)`. On any problem answer `400` with all problems in one text.
+3. **Apply at once** in memory (`ll_profiles`, reset states), so a read right after the save already shows the new limits.
+4. Return two messages: output 1 is the **retained MQTT message** on `.../limits/config` (the durable copy, `retain: true`, `qos: 1`, payload as JSON text) and output 2 the `200` reply with the saved profile.
+
+Notice the two copies. Memory makes the change immediate, the broker makes it survive a restart. When the retained message comes back to section 2, it is stored again, which is harmless.
+
+### 6.5.5 Build the GET status route
+
+| # | Node | Type | Settings |
+|---|---|---|---|
+| a | GET status | http in | Method **GET**, URL `/leaflimits/api/status/:device` |
+| b | Check token | function | Outputs 2, `auth.fn.js` |
+| c | Latest values and state | function | Outputs 1, `get-status.fn.js` |
+| d | Reply | http response | as before |
+
+The handler reads `ll_state` for each of the four sensors, and for each one that has a value it returns value, unit, state, time stamp and `age_seconds` (how old the reading is). The app uses `age_seconds` to say "no data for 2 minutes". A sensor without a value is left out. Example answer:
+
+```json
+{
+  "water_temperature": { "value": 24.7, "unit": "celsius", "state": "high",
+                         "timestamp": "2026-09-20T09:00:00.000Z", "age_seconds": 3 },
+  "internal_humidity": { "value": 58.0, "unit": "percent_rh", "state": "ok",
+                         "timestamp": "2026-09-20T09:00:00.000Z", "age_seconds": 3 }
+}
+```
+
+### 6.5.6 Test the three routes
+
+```bash
+TOKEN=...   # the value of LEAFLIMITS_TOKEN. Keep it out of chats and out of git
+BASE=http://localhost:1881/leaflimits/api
+
+curl -s -i $BASE/status/leaf-test                                   # 401: no token
+curl -s -H "Authorization: Bearer $TOKEN" $BASE/limits/leaf-test     # 200: profile (empty if none)
+
+curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"plant":"Basil","limits":{"water_temperature":{"min":18,"max":24}}}' $BASE/limits/leaf-test
+
+curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"limits":{"water_temperature":{"min":30,"max":24}}}' $BASE/limits/leaf-test   # 400: min must be lower than max
+
+curl -s -H "Authorization: Bearer $TOKEN" $BASE/status/leaf-test     # values after readings arrive
+```
+
+| You send | You get |
+|---|---|
+| No token, or a wrong one | `401` |
+| A device id such as `../x` | `400 Invalid device id.` |
+| `min` above `max`, or beyond the hard range | `400` with the reason |
+| A correct PUT | `200` with the saved profile, and a retained message appears on the broker |
+| Token not configured on the server | `503` |
+
+## 6.6 The AI suggestion route
+
+**Idea:** the app sends a photo of the plant. Node-RED forwards it to Claude with an instruction, receives limits back, cleans them, and returns them as a *suggestion*. A person always confirms.
 
 ![The AI chain and the static files chain](figures/nodered-guide/nr-suggest.png)
 
-`POST /leaflimits/api/suggest` is the longest chain.
+### Build it
 
-| # | Node | Type | What it does |
+| # | Node | Type | Settings |
 |---|---|---|---|
-| a | POST suggest | http in | Receives the photo (as text) |
-| b | Check token | function | Same as before |
-| c | Prepare AI request | function, 2 outputs | Enforces the hourly limit (20), builds the request for Claude, or answers `429` |
-| d | Claude API | http request | Method *use*; sends the request to the AI service |
-| e | Clean AI answer | function | Takes the AI's text apart, keeps only valid limits and clamps them into the hard ranges |
-| f | Reply | http response | Answers the phone |
-| g | AI request failed | catch | Receives network errors from the http request node |
-| h | AI unreachable | function | Turns the error into a `502` reply |
+| a | POST suggest | http in | Method **POST**, URL `/leaflimits/api/suggest` |
+| b | Check token | function | Outputs 2, `auth.fn.js` |
+| c | Prepare AI request | function | Outputs **2**, `suggest-prepare.fn.js` |
+| d | Claude API | http request | Method **use** (set by `msg.method`), URL **empty**, Return **a parsed JSON object**, no authentication |
+| e | Clean AI answer | function | Outputs 1, `suggest-parse.fn.js` |
+| f | Reply | http response | as before |
+| g | AI request failed | catch | Catch errors from **selected nodes**: only `Claude API` |
+| h | AI unreachable | function | Outputs 1, `suggest-error.fn.js` |
 
-The request that "Prepare AI request" builds goes to `ANTHROPIC_API_URL` with the headers `x-api-key` (from `ANTHROPIC_API_KEY`) and `anthropic-version`, the model from `ANTHROPIC_MODEL`, and a fixed instruction that asks for limits as JSON. **The key stays inside Node-RED.** The phone never sees it.
+Wires: a to b. b1 to c. b2 to f. c **output 1** to d. c **output 2** to f. d to e. e to f. g to h. h to f.
 
-**Why a catch node?** If the network is down, the http request node throws an error and the message never arrives at "Clean AI answer". A *catch* node collects such errors so you can still answer the phone with a clear message.
+Two details that matter:
+- *Return* must be a **parsed JSON object**. The next function reads `msg.payload.content`, which only exists if Node-RED parsed the answer.
+- Body size: photos are large. The app shrinks them before sending, and `Prepare AI request` refuses anything over 4 million characters.
 
-**Why "Clean AI answer" checks everything:** the AI is a text generator. Its answer can be wrong, incomplete, or outside what the sensors can measure. The function drops invalid entries and clamps the rest into the hard ranges of section 2.2. The app then shows them as suggestions the user can accept or edit.
+### What travels, node by node
 
-## 6.5 Section 4: serving the web app
+![What the message contains at each step of the AI route](figures/nodered-guide/nr-ll-ai.png)
 
-Also in the figure above (lower chain): two routes, `GET /leaflimits` and `GET /leaflimits/:file`, both go to the function **Pick file**.
+### Prepare AI request, in four blocks
 
-| # | Node | Type | What it does |
+**1. Is the AI configured?** `env.get('ANTHROPIC_API_KEY')` empty gives `503 AI suggestions are not configured on the server`. The app then tells the user to enter limits by hand.
+
+**2. Is the photo acceptable?** It must be an object with `media_type` exactly `image/jpeg` and an `image` string of base64 characters, longer than 100 and shorter than 4,000,000 characters. Otherwise `400`.
+
+**3. The hourly limit.** The server keeps a list of request times in `flow` memory (`ll_ai_hits`). Times older than an hour are dropped. If the list already has `SUGGEST_MAX_PER_HOUR` (default 20) entries, the answer is `429`. This protects your bill and it is per server, not per user.
+
+**4. Build the request.** It sets four things on the message:
+
+| Field | Value |
+|---|---|
+| `msg.method` | `POST` |
+| `msg.url` | `ANTHROPIC_API_URL` |
+| `msg.headers` | `x-api-key` (the key), `anthropic-version: 2023-06-01`, `content-type: application/json` |
+| `msg.payload` | The request body, below |
+
+The body has five parts:
+
+| Part | Content | Why |
+|---|---|---|
+| `model` | `ANTHROPIC_MODEL` | Which AI answers |
+| `max_tokens` | 1024 | The answer is short. This caps cost |
+| `system` | The instruction: identify the plant, give *healthy* ranges for a small indoor hydroponic system, stay inside the allowed range of every sensor, be honest with `confidence`, set confidence 0 if it is not a plant, answer only by calling the tool | Sets the job and the rules |
+| `messages` | One user message with the photo (base64) and the text "Recommend limits for this plant." | The question |
+| `tools` and `tool_choice` | A tool called `recommend_limits` with a fixed structure: `plant`, `confidence`, `notes`, and `limits` with `min` and `max` per sensor. The AI is **forced** to call it | Guarantees a structured answer instead of free text |
+
+The structure is generated from `LL.MEASUREMENTS`, so the allowed range of each sensor is written into the description the AI sees.
+
+### Clean AI answer, in three blocks
+
+The AI is a text generator. It can be wrong, incomplete or out of range, so its answer is treated as untrusted input.
+
+**1. Not a success.** If `msg.statusCode` is not 200 the function logs the AI service's error type and message (which never contain your key) and answers the app with a clear text:
+
+| AI service says | The app receives |
+|---|---|
+| 401 or 403 | `502` "The AI key on the server was rejected. The server owner needs to check the key." |
+| 400 with "credit balance" | `502` "The AI account has no credit left." |
+| 404 | `502` "The AI model is not available for the server's key." |
+| 429, 503, 529 | `503` "The AI service is busy right now. Try again in a minute." |
+| anything else | `502` "The AI service refused the request or is not available." |
+
+**2. Find the tool call.** The answer must contain a content block of type `tool_use` named `recommend_limits`. If not, `502` "The AI did not return a usable answer."
+
+**3. Clean every range.** For each of the four sensors: skip it unless `min` and `max` are finite numbers, clamp them into the hard range, round to one decimal, and keep the pair only if `min` is still below `max`. Confidence is clamped to 0 to 1, text is trimmed and shortened, and a missing plant name becomes `Unknown plant`. The reply has the same shape the app uses:
+
+```json
+{ "plant": "Basil", "confidence": 0.9, "notes": "Prefers warm, humid conditions.",
+  "limits": { "water_temperature": { "min": 18, "max": 24 } } }
+```
+
+The suggestion is **not saved**. The app shows it, the user can edit it, and only the PUT route from 6.5.4 saves it.
+
+### The catch node
+
+If the network fails, the http request node throws an error and the message never reaches `Clean AI answer`. A **catch** node, scoped to only the `Claude API` node, receives such errors as a message with `msg.error`. `AI unreachable` logs it and answers `502 Could not reach the AI service. Enter the limits by hand.` Because the catch node belongs to that one node, errors elsewhere do not end up here.
+
+### Test the AI route
+
+You need a JPEG file. The command turns it into the required JSON (`jq` builds the text, so a large image does not break the shell):
+
+```bash
+base64 -w0 plant.jpg | jq -Rs '{image: ., media_type: "image/jpeg"}' > body.json
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  --data-binary @body.json $BASE/suggest
+```
+
+| Test | Expected |
+|---|---|
+| No token | `401` |
+| Body `{}` | `400 Send a JPEG photo as base64...` |
+| Real photo, valid key | `200` with plant, confidence, notes and limits |
+| Empty `ANTHROPIC_API_KEY` | `503` |
+| 21 requests in an hour | The 21st gets `429` |
+| Wrong key | `502` "The AI key on the server was rejected" |
+
+> The integration tests (part 9) run this whole route against a **fake Claude** that you can start locally, so the chain is tested without spending money.
+
+## 6.7 Section 4: serve the web app
+
+**Idea:** Node-RED also serves the app itself, so one address works for everything and no other web server is needed. The app is an Angular build: a few files (`index.html`, scripts, styles, icons) in the folder `LEAFLIMITS_APP_DIR`.
+
+### Build it
+
+| # | Node | Type | Settings |
 |---|---|---|---|
-| 1 | GET app, GET app file | http in | Two entry points, same handler |
-| 2 | Pick file | function, 2 outputs | Validates the file name (letters, digits, dot, dash, underscore only, no `..`), builds the path in `LEAFLIMITS_APP_DIR` |
-| 3 | Read file | file in | Reads the file as a binary buffer (so images work too) |
-| 4 | Set headers | function | Sets `Content-Type`, caching and safety headers from the file extension; unknown types get `404` |
-| 5 | Reply | http response | Sends the file |
-| 6 | File missing | catch | Catches the "file not found" error |
-| 7 | Not found | function | Replies `404` |
+| a | GET app | http in | Method **GET**, URL `/leaflimits` |
+| b | GET app file | http in | Method **GET**, URL `/leaflimits/:file` |
+| c | Pick file | function | Outputs **2**, `static-request.fn.js` |
+| d | Read file | file in | Filename **`msg.filename`** (type msg), Output **a single Buffer object**, no encoding conversion |
+| e | Set headers | function | Outputs 1, `static-response.fn.js` |
+| f | Reply | http response | as before |
+| g | File missing | catch | Catch errors from selected nodes: only `Read file` |
+| h | Not found | function | Outputs 1, `static-missing.fn.js` |
 
-Only files directly in the app folder can be reached, so nobody can read `/etc/passwd` by asking for `../../etc/passwd`.
+Wires: a to c, b to c, c **output 1** to d, c **output 2** to f, d to e, e to f, g to h, h to f.
 
-The app itself (an Angular build) is copied to `/data/leaflimits-app` in the Node-RED container. It is served without a token, the API is not.
+Two `http in` nodes lead to one function. `/leaflimits` alone has no `:file`, so the function uses `index.html` as the default.
+
+### The three functions
+
+**Pick file** takes `msg.req.params.file` (or `index.html`) and accepts it only if it is a plain file name: it must start with a letter or digit, contain only letters, digits, dot, dash and underscore, and have no `..`. Otherwise it answers `400`. Then it sets `msg.filename` to `<LEAFLIMITS_APP_DIR>/<file>`. Because slashes are impossible in the name, nobody can reach `/etc/passwd`.
+
+**Read file** is a stock node: it reads the file into `msg.payload` as bytes. If the file does not exist it raises an error, which the catch node handles.
+
+**Set headers** looks at the file extension and sets `Content-Type` from a fixed list (html, js, css, ico, png, jpg, svg, json, webmanifest, txt). An unknown extension gets `404`. It also sets caching: `index.html` is never cached (so a new version shows at once), files with a content hash in the name (Angular adds one, such as `main-ABCD1234.js`) are cached for a year, other files for an hour. It adds `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`.
+
+**Not found** is reached from the catch node and answers `404 Not found.`
+
+### Test section 4
+
+```bash
+curl -s -i http://localhost:1881/leaflimits/ | head -12      # 200, text/html (the trailing slash also works)
+curl -s -i http://localhost:1881/leaflimits/nothing.js | head -1   # 404
+curl -s -i 'http://localhost:1881/leaflimits/..%2f..%2fetc%2fpasswd' | head -1   # 400 or 404, never the file
+```
+
+The app files are public. The API routes are not, because every one of them checks the token. The token is entered once in the app's Settings and kept in the browser.
+
+## 6.8 Deploy, enable, and check everything
+
+1. Put the app files into the container folder (`LEAFLIMITS_APP_DIR`). On the server this is a copy of the Angular build output, see `docs/DEPLOYMENT.md`.
+2. Fill in the two **credential** variables on the tab.
+3. Untick *Disabled* on the tab and press **Deploy**. Use *Modified Flows* so the running MQTT connection is not restarted.
+4. Run this checklist:
+
+| Check | How | Expected |
+|---|---|---|
+| The tab is on | The tab title is not greyed out | |
+| MQTT nodes connected | Green *connected* under the three mqtt nodes | |
+| App loads | Open `http://<server>:1881/leaflimits/` | The login page |
+| Token works | `curl` with the token to `status/<device>` | `200` (an empty object if the device is silent) |
+| Save limits | PUT from 6.5.6 | `200`, and a retained message exists |
+| Alerts | Test from 6.3.4 | One alert per real change |
+| AI | POST with a real photo | `200` with limits |
+| Restart survival | Restart Node-RED | Limits are back at once |
+
+Rollback is one action: tick *Disabled* again and deploy. The retained limits stay on the broker and the other two tabs are unaffected.
+
+## 6.9 What can go wrong in this tab
+
+| Symptom | Probable cause | Fix |
+|---|---|---|
+| No alerts ever | No limits for that device and sensor (the state stays `unknown`) | Check `GET limits/<device>`; save limits |
+| No alert on the first out-of-range reading | Working as designed: it takes 3 in a row | Wait for three readings |
+| An alert flips back and forth | Value sits on the limit | Widen the range or raise `HYSTERESIS` in `src/common.js` |
+| Status is empty | No validated readings for that device reach this tab | Check tab 1 and the device id in the topic |
+| `age_seconds` keeps growing | The device stopped sending | Check the ESP32 |
+| Every API call is `401` | Token in the app differs from `LEAFLIMITS_TOKEN` | Enter the token again in Settings |
+| Every API call is `503` | `LEAFLIMITS_TOKEN` is not set on the tab | Add the credential variable, deploy |
+| `500 Internal error.` | A bug caught by the wrapper | Read the red message in the debug sidebar |
+| A request never finishes | A path without a reply, or `msg.res` was lost | Check that every output ends in an http response |
+| PUT works but the limits vanish after a restart | The mqtt out node is not connected or not wired | Check node d in 6.5.4 |
+| AI gives `503` or `502` | Not configured, key expired or no credit, or busy | Read the message. The details are in the debug sidebar |
+| The app shows a white page | Wrong `LEAFLIMITS_APP_DIR` or missing files | Check the folder inside the container |
+| Two different limits appear | An old retained message with another device id | Clear it with `mosquitto_pub -r -n -t <topic>` |
+
+## 6.10 Summary of tab 3
+
+1. **Section 1** listens to validated readings, compares them with the limits, and publishes an alert only when the state truly changes (3 in a row to enter, 2 in a row to leave).
+2. **Section 2** keeps the limits in memory and refills them from the retained message after a restart.
+3. **Section 3** is the door for the phone: four routes, all behind a token, all ending in a reply.
+4. **The AI route** asks Claude for a suggestion, forces a structured answer, and cleans it before use.
+5. **Section 4** serves the app files safely.
+6. All of it rests on one shared toolkit `LL`, tested by 54 unit tests and 13 integration tests.
 
 ---
 
@@ -1124,19 +1552,500 @@ return msg;
 
 # Appendix C: the code of the LeafLimits functions
 
-The LeafLimits functions are not repeated here because they are generated from real files that change. Read them in `docker/node-red/leaflimits/src/`:
+Every function node of tab 3 contains the shared block (C.1), then its own code (C.2 to C.13) inside the `try/catch` wrapper of section 6.2. These are copies of the files in `docker/node-red/leaflimits/src/`. If they ever differ, the files win.
 
-| File | Node |
-|---|---|
-| `evaluate.fn.js` | Evaluate against limits |
-| `config-store.fn.js` | Store profile in memory |
-| `auth.fn.js` | Check token |
-| `get-limits.fn.js` | Read profile |
-| `put-limits.fn.js` | Validate and save profile |
-| `get-status.fn.js` | Latest values and state |
-| `suggest-prepare.fn.js` | Prepare AI request |
-| `suggest-parse.fn.js` | Clean AI answer |
-| `suggest-error.fn.js` | AI unreachable |
-| `static-request.fn.js` | Pick file |
-| `static-response.fn.js` | Set headers |
-| `static-missing.fn.js` | Not found |
+## C.1 Shared block: `common.js`
+
+```javascript
+// LeafLimits shared code. build.js inlines this block at the top of every function node,
+// because Node-RED function nodes cannot import modules. The unit tests run the same text.
+const LL = {
+    SCHEMA_VERSION: 1,
+
+    // Same plausible ranges as PLAUSIBLE_RANGES in the MQTT Validation flow. Limits must stay inside them.
+    MEASUREMENTS: {
+        water_temperature: { label: 'Water temperature', hardMin: 0, hardMax: 50 },
+        internal_temperature: { label: 'Air temperature, inside', hardMin: -10, hardMax: 60 },
+        internal_humidity: { label: 'Humidity, inside', hardMin: 0, hardMax: 100 },
+        external_temperature: { label: 'Air temperature, outside', hardMin: -40, hardMax: 60 }
+    },
+    // Must start with a letter or digit, so names like __proto__ are never valid device ids.
+    DEVICE_RE: /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/,
+
+    ENTER_COUNT: 3,   // consecutive out-of-range readings before low/high is raised (15 s at a 5 s interval)
+    EXIT_COUNT: 2,    // consecutive in-range readings before low/high is cleared
+    HYSTERESIS: 0.02, // share of (max - min) a value must move back inside before it counts as in range
+
+    known(key) {
+        return Object.prototype.hasOwnProperty.call(LL.MEASUREMENTS, key);
+    },
+
+    own(obj, key) {
+        return obj && Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined;
+    },
+
+    // MQTT payloads arrive as string or Buffer. Returns the parsed value, or undefined when it is not JSON.
+    parseJson(payload) {
+        let raw = payload;
+        if (Buffer.isBuffer(raw)) raw = raw.toString('utf8');
+        if (typeof raw !== 'string') return raw;
+        try { return JSON.parse(raw); } catch (e) { return undefined; }
+    },
+
+    // After a profile change every sensor starts over from "unknown". The latest values are kept.
+    resetStates(states, device) {
+        for (const key of Object.keys(LL.MEASUREMENTS)) {
+            const e = LL.own(states, device + '/' + key);
+            if (e) states[device + '/' + key] = { state: 'unknown', streak: 0, value: e.value, unit: e.unit, timestamp: e.timestamp };
+        }
+    },
+
+    reply(msg, status, body, extraHeaders) {
+        msg.statusCode = status;
+        msg.payload = body;
+        msg.headers = Object.assign({
+            'Content-Type': 'application/json; charset=utf-8',
+            'Cache-Control': 'no-store',
+            'X-Content-Type-Options': 'nosniff'
+        }, extraHeaders || {});
+        return msg;
+    },
+
+    // Constant-time comparison, so the response time does not reveal how much of a token matched.
+    sameToken(a, b) {
+        if (typeof a !== 'string' || typeof b !== 'string') return false;
+        let diff = a.length ^ b.length;
+        const n = Math.max(a.length, b.length);
+        for (let i = 0; i < n; i++) diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
+        return diff === 0;
+    },
+
+    // Returns null when the request may continue, otherwise the reply to send.
+    auth(msg, env) {
+        const expected = env.get('LEAFLIMITS_TOKEN');
+        if (!expected) return LL.reply(msg, 503, { message: 'The access token is not configured on the server.' });
+        const header = (msg.req && msg.req.headers && msg.req.headers.authorization) || '';
+        const m = /^Bearer\s+(.+)$/i.exec(header);
+        if (!m || !LL.sameToken(m[1].trim(), String(expected))) {
+            return LL.reply(msg, 401, { message: 'Wrong or missing access token.' });
+        }
+        return null;
+    },
+
+    device(msg) {
+        const d = msg.req && msg.req.params && msg.req.params.device;
+        return typeof d === 'string' && LL.DEVICE_RE.test(d) ? d : null;
+    },
+
+    defaultProfile(device) {
+        return { device_id: device, plant: '', source: 'default', updated_at: null, limits: {} };
+    },
+
+    // Returns a problem description, or null when the range is fine.
+    checkRange(key, r) {
+        const m = LL.MEASUREMENTS[key];
+        if (!r || typeof r !== 'object' || Array.isArray(r)) return 'must be an object with min and max';
+        if (typeof r.min !== 'number' || typeof r.max !== 'number' || !Number.isFinite(r.min) || !Number.isFinite(r.max)) {
+            return 'min and max must be numbers';
+        }
+        if (r.min >= r.max) return 'min must be lower than max';
+        if (r.min < m.hardMin || r.max > m.hardMax) return 'must stay between ' + m.hardMin + ' and ' + m.hardMax;
+        return null;
+    },
+
+    // Strict: any problem rejects the whole profile. Returns { error } or { profile }.
+    parseProfile(body, device) {
+        if (!body || typeof body !== 'object' || Array.isArray(body)) return { error: 'The body must be a JSON object.' };
+        const problems = [];
+        const plant = body.plant === undefined ? '' : body.plant;
+        if (typeof plant !== 'string' || plant.length > 60) problems.push('plant must be text of at most 60 characters');
+        const input = body.limits === undefined ? {} : body.limits;
+        const limits = {};
+        if (!input || typeof input !== 'object' || Array.isArray(input)) {
+            problems.push('limits must be an object');
+        } else {
+            for (const key of Object.keys(input)) {
+                if (!LL.known(key)) { problems.push('unknown measurement "' + key + '"'); continue; }
+                const p = LL.checkRange(key, input[key]);
+                if (p) problems.push(key + ': ' + p);
+                else limits[key] = { min: input[key].min, max: input[key].max };
+            }
+        }
+        if (problems.length) return { error: problems.join('; ') };
+        return {
+            profile: {
+                device_id: device,
+                plant: String(plant).trim(),
+                source: body.source === 'ai' ? 'ai' : 'manual',
+                updated_at: new Date().toISOString(),
+                limits
+            }
+        };
+    },
+
+    classify(value, range) {
+        if (!range) return 'unknown';
+        if (value < range.min) return 'low';
+        if (value > range.max) return 'high';
+        return 'ok';
+    },
+
+    // One step of the per-sensor state machine. Returns the new entry (without value fields) and
+    // whether an alert should be published (entering or leaving low/high).
+    step(prev, value, range) {
+        const isAlert = (s) => s === 'low' || s === 'high';
+        if (!range) return { entry: { state: 'unknown', streak: 0 }, changed: isAlert(prev.state) };
+
+        // No history, or the limits were just changed: start from "ok" so that a single odd reading
+        // does not raise an alert.
+        const before = prev.state === 'unknown' ? 'ok' : prev.state;
+        let target = LL.classify(value, range);
+        if (target === 'ok') {
+            const band = (range.max - range.min) * LL.HYSTERESIS;
+            if (before === 'low' && value < range.min + band) target = 'low';
+            if (before === 'high' && value > range.max - band) target = 'high';
+        }
+        if (target === before) return { entry: { state: before, streak: 0 }, changed: false };
+
+        const need = target === 'ok' ? LL.EXIT_COUNT : LL.ENTER_COUNT;
+        const streak = (prev.candidate === target ? prev.streak : 0) + 1;
+        if (streak >= need) {
+            return { entry: { state: target, streak: 0 }, changed: isAlert(target) || isAlert(before) };
+        }
+        return { entry: { state: before, streak, candidate: target }, changed: false };
+    }
+};
+```
+
+## C.2 `evaluate.fn.js`: node "Evaluate against limits" (1 output)
+
+```javascript
+// Input: one validated reading from microhydros/v1/devices/+/telemetry/validated/+
+// Updates the per-sensor state and sends an alert message only when the state changes.
+const r = LL.parseJson(msg.payload);
+if (!r || typeof r !== 'object') return null;
+const device = r.device_id;
+const key = r.measurement;
+const value = r.value;
+if (typeof device !== 'string' || !LL.DEVICE_RE.test(device) || typeof key !== 'string' || !LL.known(key)
+    || typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+}
+
+const profile = LL.own(flow.get('ll_profiles') || {}, device);
+const range = profile && profile.limits ? LL.own(profile.limits, key) : undefined;
+const states = flow.get('ll_state') || {};
+const id = device + '/' + key;
+const prev = LL.own(states, id) || { state: 'unknown', streak: 0 };
+const timestamp = typeof r.timestamp === 'string' ? r.timestamp : new Date().toISOString();
+
+const result = LL.step(prev, value, range);
+states[id] = Object.assign({}, result.entry, { value, unit: r.unit, timestamp });
+flow.set('ll_state', states);
+
+if (!result.changed) return null;
+return {
+    topic: 'microhydros/v1/devices/' + device + '/limits/alert',
+    qos: 1,
+    retain: false,
+    payload: {
+        schema_version: LL.SCHEMA_VERSION,
+        device_id: device,
+        measurement: key,
+        state: result.entry.state,
+        previous_state: prev.state,
+        value,
+        unit: r.unit,
+        limit: range ? { min: range.min, max: range.max } : null,
+        timestamp
+    }
+};
+```
+
+## C.3 `config-store.fn.js`: node "Store profile in memory" (0 outputs)
+
+```javascript
+// Input: the retained profile on microhydros/v1/devices/{device}/limits/config.
+// The broker is the source of truth, so limits survive a Node-RED restart: the retained message
+// is delivered again as soon as this flow subscribes.
+const device = String(msg.topic || '').split('/')[3];
+if (!LL.DEVICE_RE.test(device || '')) return null;
+
+const profiles = flow.get('ll_profiles') || {};
+const states = flow.get('ll_state') || {};
+const text = Buffer.isBuffer(msg.payload) ? msg.payload.toString('utf8') : msg.payload;
+
+if (text === undefined || text === null || (typeof text === 'string' && text.trim() === '')) {
+    // An empty retained message clears the profile.
+    delete profiles[device];
+} else {
+    const raw = LL.parseJson(text);
+    if (raw === undefined) { node.warn('Ignoring limits for ' + device + ': not valid JSON'); return null; }
+    const parsed = LL.parseProfile(raw, device);
+    if (parsed.error) { node.warn('Ignoring invalid limits for ' + device + ': ' + parsed.error); return null; }
+    if (typeof raw.updated_at === 'string') parsed.profile.updated_at = raw.updated_at;
+    profiles[device] = parsed.profile;
+}
+LL.resetStates(states, device);
+flow.set('ll_profiles', profiles);
+flow.set('ll_state', states);
+return null;
+```
+
+## C.4 `auth.fn.js`: node "Check token (four copies)" (2 outputs)
+
+```javascript
+// Bearer token check in front of every API route. Output 1 continues, output 2 is the error reply.
+const denied = LL.auth(msg, env);
+return denied ? [null, denied] : [msg, null];
+```
+
+## C.5 `get-limits.fn.js`: node "Read profile" (1 output)
+
+```javascript
+const device = LL.device(msg);
+if (!device) return LL.reply(msg, 400, { message: 'Invalid device id.' });
+const profile = LL.own(flow.get('ll_profiles') || {}, device);
+return LL.reply(msg, 200, profile || LL.defaultProfile(device));
+```
+
+## C.6 `put-limits.fn.js`: node "Validate and save profile" (2 outputs)
+
+```javascript
+// Output 1: the profile as a retained MQTT message (the durable copy). Output 2: the HTTP reply.
+const device = LL.device(msg);
+if (!device) return [null, LL.reply(msg, 400, { message: 'Invalid device id.' })];
+const parsed = LL.parseProfile(msg.payload, device);
+if (parsed.error) return [null, LL.reply(msg, 400, { message: parsed.error })];
+const profile = parsed.profile;
+
+// Apply immediately, so a read right after the save already sees the new limits.
+const profiles = flow.get('ll_profiles') || {};
+const states = flow.get('ll_state') || {};
+profiles[device] = profile;
+LL.resetStates(states, device);
+flow.set('ll_profiles', profiles);
+flow.set('ll_state', states);
+
+return [
+    {
+        topic: 'microhydros/v1/devices/' + device + '/limits/config',
+        payload: JSON.stringify(Object.assign({ schema_version: LL.SCHEMA_VERSION }, profile)),
+        retain: true,
+        qos: 1
+    },
+    LL.reply(msg, 200, profile)
+];
+```
+
+## C.7 `get-status.fn.js`: node "Latest values and state" (1 output)
+
+```javascript
+const device = LL.device(msg);
+if (!device) return LL.reply(msg, 400, { message: 'Invalid device id.' });
+const states = flow.get('ll_state') || {};
+const now = Date.now();
+const out = {};
+for (const key of Object.keys(LL.MEASUREMENTS)) {
+    const e = LL.own(states, device + '/' + key);
+    if (e && e.value !== undefined) {
+        const age = Math.round((now - Date.parse(e.timestamp)) / 1000);
+        out[key] = { value: e.value, unit: e.unit, state: e.state, timestamp: e.timestamp, age_seconds: Number.isFinite(age) ? Math.max(0, age) : null };
+    }
+}
+return LL.reply(msg, 200, out);
+```
+
+## C.8 `suggest-prepare.fn.js`: node "Prepare AI request" (2 outputs)
+
+```javascript
+// POST /leaflimits/api/suggest. Output 1: the request for the Claude API. Output 2: an early reply.
+// The key comes from the tab's credential variable ANTHROPIC_API_KEY, never from the flow file.
+const key = env.get('ANTHROPIC_API_KEY');
+if (!key) {
+    return [null, LL.reply(msg, 503, { message: 'AI suggestions are not configured on the server. Enter the limits by hand.' })];
+}
+
+const body = msg.payload;
+if (!body || typeof body !== 'object' || body.media_type !== 'image/jpeg' || typeof body.image !== 'string'
+    || body.image.length < 100 || body.image.length > 4000000 || !/^[A-Za-z0-9+/=]+$/.test(body.image)) {
+    return [null, LL.reply(msg, 400, { message: 'Send a JPEG photo as base64 in "image", with "media_type": "image/jpeg".' })];
+}
+
+// At most SUGGEST_MAX_PER_HOUR requests per hour for the whole server, to protect the API bill.
+const max = Number(env.get('SUGGEST_MAX_PER_HOUR')) || 20;
+const now = Date.now();
+const hits = (flow.get('ll_ai_hits') || []).filter((t) => now - t < 3600000);
+if (hits.length >= max) {
+    return [null, LL.reply(msg, 429, { message: 'Too many AI requests this hour. Try again later or enter the limits by hand.' })];
+}
+hits.push(now);
+flow.set('ll_ai_hits', hits);
+
+const range = (key2) => {
+    const m = LL.MEASUREMENTS[key2];
+    return {
+        type: 'object',
+        description: m.label + ' in ' + (key2 === 'internal_humidity' ? '% relative humidity' : 'degrees Celsius') +
+            '. Allowed values ' + m.hardMin + ' to ' + m.hardMax + '.',
+        properties: { min: { type: 'number' }, max: { type: 'number' } },
+        required: ['min', 'max']
+    };
+};
+const limitProps = {};
+for (const k of Object.keys(LL.MEASUREMENTS)) limitProps[k] = range(k);
+
+msg.method = 'POST';
+msg.url = env.get('ANTHROPIC_API_URL') || 'https://api.anthropic.com/v1/messages';
+msg.headers = { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' };
+msg.payload = {
+    model: env.get('ANTHROPIC_MODEL') || 'claude-sonnet-5',
+    max_tokens: 1024,
+    system: 'You help a hobby grower set operating limits for a small indoor hydroponic system. You get one photo of a plant. ' +
+        'Identify the plant as well as you can and recommend comfortable operating ranges for the sensors in the tool. ' +
+        'Rules: temperatures are in degrees Celsius and humidity is relative humidity in percent. Stay inside the allowed range given for each sensor. ' +
+        'A range describes healthy conditions for this plant in a hydroponic setup, not the extremes it can survive. ' +
+        'Only include external_temperature if the outside air matters for this plant, otherwise leave it out. ' +
+        'If the photo does not show a plant or you cannot tell what it is, set confidence to 0, leave limits empty and explain in notes. ' +
+        'Set confidence honestly between 0 and 1. Keep notes under 300 characters. Answer only by calling the tool.',
+    messages: [{
+        role: 'user',
+        content: [
+            { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: body.image } },
+            { type: 'text', text: 'Recommend limits for this plant.' }
+        ]
+    }],
+    tools: [{
+        name: 'recommend_limits',
+        description: 'Report the identified plant and the recommended operating limits.',
+        input_schema: {
+            type: 'object',
+            properties: {
+                plant: { type: 'string', description: 'Common name of the plant, for example Basil' },
+                confidence: { type: 'number', description: 'How sure you are about the plant, 0 to 1' },
+                notes: { type: 'string', description: 'Short reasoning or caveats' },
+                limits: { type: 'object', properties: limitProps }
+            },
+            required: ['plant', 'confidence', 'notes', 'limits']
+        }
+    }],
+    tool_choice: { type: 'tool', name: 'recommend_limits' }
+};
+return [msg, null];
+```
+
+## C.9 `suggest-parse.fn.js`: node "Clean AI answer" (1 output)
+
+```javascript
+// Reads the tool call out of the Claude response and cleans it. The AI is never trusted:
+// every range is checked against the sensor's plausible range and invalid ones are dropped.
+if (msg.statusCode !== 200) {
+    // Log Anthropic's own error type and message (they never contain the key), and tell the app the real reason.
+    const e = msg.payload && typeof msg.payload === 'object' && msg.payload.error && typeof msg.payload.error === 'object' ? msg.payload.error : {};
+    const detail = String(e.message || '').slice(0, 200);
+    node.warn('Anthropic API answered with status ' + msg.statusCode + (e.type ? ' (' + e.type + ')' : '') + (detail ? ': ' + detail : ''));
+    const s = msg.statusCode;
+    if (s === 401 || s === 403) {
+        return LL.reply(msg, 502, { message: "The AI key on the server was rejected. The server owner needs to check the key." });
+    }
+    if (s === 400 && /credit balance/i.test(detail)) {
+        return LL.reply(msg, 502, { message: 'The AI account has no credit left. The server owner needs to add credit.' });
+    }
+    if (s === 404) {
+        return LL.reply(msg, 502, { message: "The AI model is not available for the server's key." });
+    }
+    if (s === 429 || s === 503 || s === 529) {
+        return LL.reply(msg, 503, { message: 'The AI service is busy right now. Try again in a minute.' });
+    }
+    return LL.reply(msg, 502, { message: 'The AI service refused the request or is not available. Enter the limits by hand.' });
+}
+const blocks = msg.payload && Array.isArray(msg.payload.content) ? msg.payload.content : [];
+const call = blocks.find((b) => b && b.type === 'tool_use' && b.name === 'recommend_limits');
+if (!call || !call.input || typeof call.input !== 'object') {
+    return LL.reply(msg, 502, { message: 'The AI did not return a usable answer. Enter the limits by hand.' });
+}
+const input = call.input;
+const round1 = (n) => Math.round(n * 10) / 10;
+
+const limits = {};
+const source = input.limits && typeof input.limits === 'object' ? input.limits : {};
+for (const key of Object.keys(LL.MEASUREMENTS)) {
+    const r = LL.own(source, key);
+    if (!r || typeof r.min !== 'number' || typeof r.max !== 'number' || !Number.isFinite(r.min) || !Number.isFinite(r.max)) continue;
+    const m = LL.MEASUREMENTS[key];
+    const min = round1(Math.max(m.hardMin, r.min));
+    const max = round1(Math.min(m.hardMax, r.max));
+    if (LL.checkRange(key, { min, max }) === null) limits[key] = { min, max };
+}
+
+const conf = typeof input.confidence === 'number' && Number.isFinite(input.confidence) ? input.confidence : 0;
+const text = (v, n, fallback) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, n) : fallback);
+return LL.reply(msg, 200, {
+    plant: text(input.plant, 80, 'Unknown plant'),
+    confidence: Math.min(1, Math.max(0, conf)),
+    notes: text(input.notes, 400, ''),
+    limits
+});
+```
+
+## C.10 `suggest-error.fn.js`: node "AI unreachable" (1 output)
+
+```javascript
+// Reached from a catch node when the request to the Claude API fails (network, timeout).
+node.warn('Request to the AI service failed: ' + (msg.error && msg.error.message));
+return LL.reply(msg, 502, { message: 'Could not reach the AI service. Enter the limits by hand.' });
+```
+
+## C.11 `static-request.fn.js`: node "Pick file" (2 outputs)
+
+```javascript
+// GET /leaflimits and GET /leaflimits/:file. Output 1 goes to the file-in node, output 2 is an error reply.
+// Only plain file names are accepted, so nothing outside the app folder can be read.
+const file = (msg.req && msg.req.params && msg.req.params.file) || 'index.html';
+if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(file) || file.indexOf('..') !== -1) {
+    return [null, LL.reply(msg, 400, { message: 'Bad file name.' })];
+}
+const dir = String(env.get('LEAFLIMITS_APP_DIR') || '/data/leaflimits-app').replace(/\/+$/, '');
+msg.filename = dir + '/' + file;
+return [msg, null];
+```
+
+## C.12 `static-response.fn.js`: node "Set headers" (1 output)
+
+```javascript
+// The file-in node put the file in msg.payload as a Buffer. Set the type and caching headers.
+const name = String(msg.filename || '');
+const ext = name.slice(name.lastIndexOf('.') + 1).toLowerCase();
+const TYPES = {
+    html: 'text/html; charset=utf-8',
+    js: 'text/javascript; charset=utf-8',
+    css: 'text/css; charset=utf-8',
+    ico: 'image/x-icon',
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    svg: 'image/svg+xml',
+    json: 'application/json; charset=utf-8',
+    webmanifest: 'application/manifest+json',
+    txt: 'text/plain; charset=utf-8'
+};
+const type = Object.prototype.hasOwnProperty.call(TYPES, ext) ? TYPES[ext] : null;
+if (!type) return LL.reply(msg, 404, { message: 'Not found.' });
+
+const hashed = /-[A-Z0-9]{8}\.(js|css)$/.test(name);   // Angular puts a content hash in these names
+msg.statusCode = 200;
+msg.headers = {
+    'Content-Type': type,
+    'Cache-Control': ext === 'html' ? 'no-cache' : (hashed ? 'public, max-age=31536000, immutable' : 'public, max-age=3600'),
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer'
+};
+return msg;
+```
+
+## C.13 `static-missing.fn.js`: node "Not found" (1 output)
+
+```javascript
+// Reached from a catch node when the file-in node cannot read the file.
+return LL.reply(msg, 404, { message: 'Not found.' });
+```
+

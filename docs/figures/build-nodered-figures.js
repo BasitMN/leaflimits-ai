@@ -314,6 +314,50 @@ function figInflux() {
     return f.svg();
 }
 
+function figLlState() {
+    const f = new Fig(1000, 470);
+    const mk = (c) => `url(#m${c.slice(1)})`;
+    const P = (d, c, w = 3) => f.add(`<path d="${d}" fill="none" stroke="${c}" stroke-width="${w}" marker-end="${mk(c)}"/>`);
+    B(f, 400, 25, 200, 70, 'unknown', 'no limits, or just changed', { fill: C.grayFill, stroke: C.gray, tsize: 16, ssize: 11.5 });
+    B(f, 400, 195, 200, 84, 'ok', 'inside min..max', { fill: C.okFill, stroke: C.ok, tsize: 18, ssize: 12 });
+    B(f, 25, 195, 225, 84, 'low', 'below min', { fill: C.fill, stroke: C.blue, tsize: 18, ssize: 12 });
+    B(f, 750, 195, 225, 84, 'high', 'above max', { fill: C.badFill, stroke: C.bad, tsize: 18, ssize: 12 });
+    P('M500 95 V195', C.gray); L(f, 515, 150, 'first reading with limits: start from ok', { size: 11.5, fill: C.gray, anchor: 'start' });
+    P('M600 220 H750', C.bad); L(f, 675, 200, '3 in a row above max', { size: 11.5, fill: C.bad }); L(f, 675, 188, '', {});
+    P('M750 258 H600', C.ok); L(f, 675, 278, '2 in a row back inside', { size: 11.5, fill: C.ok });
+    P('M400 220 H250', C.blue); L(f, 325, 200, '3 in a row below min', { size: 11.5, fill: C.blue });
+    P('M250 258 H400', C.ok); L(f, 325, 278, '2 in a row back inside', { size: 11.5, fill: C.ok });
+    B(f, 25, 330, 450, 110, 'Every arrow between ok / low / high publishes an alert', 'to microhydros/v1/devices/{id}/limits/alert.\nWhile the streak is still counting (1 of 3, 2 of 3)\nnothing is sent. Leaving low or high for unknown\nalso sends an alert.', { fill: C.warnFill, stroke: C.warn, tsize: 12.5, ssize: 11.5, sfill: '#222' });
+    B(f, 500, 330, 475, 110, 'Two protections against flicker', '1. the streak: one odd reading changes nothing.\n2. hysteresis: to count as "back inside", a value must be\nat least 2 % of the range (max - min) inside the limit.\nNew limits saved in the app: every sensor resets to unknown.', { fill: '#fff', stroke: C.accent, tsize: 12.5, ssize: 11.5, sfill: '#222' });
+    return f.svg();
+}
+
+function figLlAi() {
+    const f = new Fig(1000, 720);
+    const xs = [15, 350, 685], NW = 210, CW = 300;
+    const row = (y, defs) => defs.forEach((d, i) => {
+        const n = NODE(f, xs[i], y, d[0], d[1], Object.assign({ w: NW }, d[2] || {}));
+        B(f, xs[i], y + 30, CW, 235, d[3], d[4], { fill: d[6], stroke: d[5], tsize: 12, ssize: 10.8, sfill: '#222' });
+        d.n = n;
+    });
+    const r1 = [
+        ['http', 'POST suggest', { ins: 0 }, '1. the phone asks', 'POST /leaflimits/api/suggest\nAuthorization: Bearer <token>\n\npayload (object):\n{ "image": "<base64 JPEG>",\n  "media_type": "image/jpeg" }\n\nmsg.req / msg.res are added\nby the http in node', C.warn, C.warnFill],
+        ['function', 'Check token', { outs: 2 }, '2. is the caller allowed?', 'output 1: the message goes on\noutput 2: an error reply\n   401 wrong or missing token\n   503 no token configured\n\nThe token is compared in\nconstant time, so the answer\ntime tells nothing.', C.accent, C.fill],
+        ['function', 'Prepare AI request', { outs: 2 }, '3. build the request', 'checks: key exists (else 503),\nJPEG base64 and size (else 400),\nless than 20 per hour (else 429)\n\nthen sets:\nmethod POST, url, headers with\nthe key, payload = model,\ninstruction, photo and a tool\nthat forces a JSON answer', C.purple, C.purpleFill]
+    ];
+    const r2 = [
+        ['http', 'Claude API', {}, '4. the AI works', 'The http request node sends it\n(method: use, return: object).\n\nThe answer comes back as:\nmsg.statusCode = 200\nmsg.payload.content[ ... ]\n   one "tool_use" block with\n   plant, confidence, notes, limits', C.blue, C.fill],
+        ['function', 'Clean AI answer', {}, '5. never trust the AI', 'not 200: turn it into a clear\nmessage (key rejected, no credit,\nbusy ...).\n\n200: find the tool block, then for\nevery sensor keep min/max only if\nthey are numbers, clamp them into\nthe hard range, round to 0.1, and\ndrop what is still invalid.', C.ok, C.okFill],
+        ['http', 'Reply', { outs: 0 }, '6. the phone gets it', '200 with\n{ "plant": "Basil",\n  "confidence": 0.9,\n  "notes": "...",\n  "limits": {\n    "water_temperature":\n      {"min": 18, "max": 24} } }\n\nThe app shows it as a suggestion\nthe user can edit before saving.', C.ok, C.okFill]
+    ];
+    row(40, r1); row(400, r2);
+    WIRE(f, r1[0].n.outPt(0), r1[1].n.inPt); WIRE(f, r1[1].n.outPt(0), r1[2].n.inPt);
+    WIRE(f, r2[0].n.outPt(0), r2[1].n.inPt); WIRE(f, r2[1].n.outPt(0), r2[2].n.inPt);
+    T(f, 500, 352, 'Prepare AI request  →  Claude API  (continues in the second row)', { size: 13, bold: true, fill: C.accent });
+    T(f, 500, 695, 'Errors: a network failure never reaches node 5. The catch node "AI request failed" turns it into a 502 reply.', { size: 12, fill: C.gray, italic: true });
+    return f.svg();
+}
+
 function figMemory() {
     const f = new Fig(900, 512);
     const rows = [
@@ -357,6 +401,6 @@ function figLife() {
 
 const FIGS = {
     'nr-editor': figEditor, 'nr-msg': figMsg, 'nr-tabs': figTabs, 'nr-tab1': figTab1, 'nr-tab2': figTab2, 'nr-lleval': figLLEval, 'nr-api': figApi,
-    'nr-suggest': figSuggest, 'nr-lifecycle': figLifecycle, 'nr-build': figBuild, 'nr-env': figEnv, 'nr-memory': figMemory, 'nr-influx': figInflux, 'nr-life': figLife
+    'nr-suggest': figSuggest, 'nr-lifecycle': figLifecycle, 'nr-build': figBuild, 'nr-env': figEnv, 'nr-memory': figMemory, 'nr-influx': figInflux, 'nr-ll-state': figLlState, 'nr-ll-ai': figLlAi, 'nr-life': figLife
 };
 renderAll(FIGS, OUT, 1600, process.argv.slice(2));
