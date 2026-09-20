@@ -116,6 +116,13 @@ without putting the key in the chat or in shell history:
 read -rs -p "Anthropic key: " K; printf %s "$K" > /root/ws/.anthropic_key; chmod 600 /root/ws/.anthropic_key
 ```
 
+Check the key before starting the runner. The checker says in plain words whether the key is accepted, whether the account has credit and
+whether the model is available (it never prints the key, and the test request costs almost nothing):
+
+```bash
+bash docker/node-red/leaflimits/dev/check-key.sh
+```
+
 The runner reads the file when it starts, so restart it after creating or changing the key. The key is handed to Node-RED only through
 its process environment: it is never written to `flows.json`, a log or any other file, and never printed. Each suggestion is one
 paid API request, and the tab limits them to 20 per hour.
