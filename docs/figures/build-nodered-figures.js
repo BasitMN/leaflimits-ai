@@ -290,6 +290,30 @@ function figEnv() {
     return f.svg();
 }
 
+function figInflux() {
+    const f = new Fig(1000, 400);
+    const xs = [10, 207, 404, 601, 798], W = 185, NW = 172;
+    const nodes = [
+        NODE(f, xs[0], 40, 'mqtt', 'Validated telemetry', { w: NW, ins: 0 }), NODE(f, xs[1], 40, 'json', 'Parse validated JSON', { w: NW }),
+        NODE(f, xs[2], 40, 'function', 'Build InfluxDB write', { w: NW }), NODE(f, xs[3], 40, 'http', 'InfluxDB write', { w: NW }),
+        NODE(f, xs[4], 40, 'debug', 'debug 1', { w: NW, outs: 0 })
+    ];
+    for (let i = 0; i < 4; i++) WIRE(f, nodes[i].outPt(0), nodes[i + 1].inPt);
+    const cards = [
+        ['1. text arrives', 'topic:\n.../validated/\nwater_temperature\n\npayload = TEXT\n{"device_id":\n"esp32s3-01",\n"value":24.7, ...}', C.purple, C.purpleFill],
+        ['2. now an object', 'payload = OBJECT\n\n.device_id\n.measurement\n.value  (24.7)\n.unit, .sensor_id\n.timestamp\n.sequence, .boot_id', C.warn, C.warnFill],
+        ['3. request built', 'method = "POST"\nurl = INFLUXDB_URL\n/api/v2/write?org=..\n&bucket=..&precision=ms\nheaders = Token ...\n\npayload = ONE LINE\nof text', C.accent, C.fill],
+        ['4. sent', 'POST to InfluxDB\n\nanswer:\nstatusCode 204\npayload "" (empty)\n\n204 = "stored,\nnothing to say"', C.blue, C.fill],
+        ['5. visible', 'the sidebar shows\nthe answer\n\nempty = success\n\nan error text =\nsomething is wrong', C.ok, C.okFill]
+    ];
+    cards.forEach((c, i) => {
+        B(f, xs[i], 100, W, 200, c[0], c[1], { fill: c[3], stroke: c[2], tsize: 11.5, ssize: 10.5, sfill: '#222' });
+    });
+    T(f, 500, 335, 'The same message travels the whole way. Each node changes or adds fields.', { size: 13.5, bold: true, fill: C.accent });
+    T(f, 500, 364, 'Only node 3 knows about InfluxDB. Node 4 just sends whatever node 3 prepared.', { size: 12.5, fill: C.gray, italic: true });
+    return f.svg();
+}
+
 function figMemory() {
     const f = new Fig(900, 512);
     const rows = [
@@ -333,6 +357,6 @@ function figLife() {
 
 const FIGS = {
     'nr-editor': figEditor, 'nr-msg': figMsg, 'nr-tabs': figTabs, 'nr-tab1': figTab1, 'nr-tab2': figTab2, 'nr-lleval': figLLEval, 'nr-api': figApi,
-    'nr-suggest': figSuggest, 'nr-lifecycle': figLifecycle, 'nr-build': figBuild, 'nr-env': figEnv, 'nr-memory': figMemory, 'nr-life': figLife
+    'nr-suggest': figSuggest, 'nr-lifecycle': figLifecycle, 'nr-build': figBuild, 'nr-env': figEnv, 'nr-memory': figMemory, 'nr-influx': figInflux, 'nr-life': figLife
 };
 renderAll(FIGS, OUT, 1600, process.argv.slice(2));
