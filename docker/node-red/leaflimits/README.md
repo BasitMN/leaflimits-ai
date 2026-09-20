@@ -109,11 +109,12 @@ Open the app, enter the token `demo` under Settings, and use the device `esp32s3
 the runner runs. Logs are in `/tmp/leaflimits-demo/` (`demo.out`, `node-red.log`). Everything is installed under
 `$LL_DEMO_HOME` (default `/tmp/leaflimits-demo`), never inside the repo.
 
-**Real AI.** If the file `/root/ws/.anthropic_key` exists, the runner uses the real Claude API, otherwise a fake answer. Create the file
-without putting the key in the chat or in shell history:
+**Real AI.** If the file `.anthropic_key` exists in the ws folder (next to the repo folder, never inside it), the runner uses the
+real Claude API, otherwise a fake answer. Save the key with the script. It works from any terminal on the phone, hides the input and
+never prints the key:
 
 ```bash
-read -rs -p "Anthropic key: " K; printf %s "$K" > /root/ws/.anthropic_key; chmod 600 /root/ws/.anthropic_key
+bash docker/node-red/leaflimits/dev/save-key.sh
 ```
 
 Check the key before starting the runner. The checker says in plain words whether the key is accepted, whether the account has credit and

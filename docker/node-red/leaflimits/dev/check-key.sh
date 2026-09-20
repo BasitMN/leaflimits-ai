@@ -4,7 +4,8 @@
 #   bash docker/node-red/leaflimits/dev/check-key.sh
 #   LL_DEMO_KEY_FILE=/other/file bash .../check-key.sh
 set -uo pipefail
-KF=${LL_DEMO_KEY_FILE:-/root/ws/.anthropic_key}
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+KF=${LL_DEMO_KEY_FILE:-$(cd "$HERE/../../../../.." && pwd)/.anthropic_key}
 MODEL=${ANTHROPIC_MODEL:-claude-sonnet-5}
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 bad=0
