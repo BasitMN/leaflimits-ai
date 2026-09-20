@@ -14,7 +14,7 @@ How the three Node-RED tabs of MicroHydros are built, node by node, and how they
 | 2 | The big picture: three tabs, one broker |
 | 3 | Before you start: two ways to get the flows |
 | 4 | Tab 1: MQTT Validation |
-| 5 | Tab 2: InfluxDB storage |
+| 5 | Tab 2: InfluxDB storage (step by step, in detail) |
 | 6 | Tab 3: LeafLimits (four sections) |
 | 7 | How the tabs work together |
 | 8 | Configuration and secrets |
@@ -251,59 +251,282 @@ You should see the raw message, then four `validated/...` messages. Send the sam
 
 ---
 
-# 5. Tab 2: InfluxDB storage
+# 5. Tab 2: InfluxDB storage (step by step)
 
-**Job:** every validated reading becomes one row in the database, so Grafana can draw history.
+**Job:** every validated reading becomes one row in the database, so Grafana can draw history. This tab is small (five nodes), but it teaches the most important Node-RED pattern: *build a request in a function, send it with a generic node*. Read it slowly.
 
 ![Tab 2 as it looks in Node-RED](figures/nodered-guide/nr-tab2.png)
 
-## 5.1 The nodes
+## 5.1 What you need to know about InfluxDB first
 
-| # | Node | Type | Important settings |
-|---|---|---|---|
-| 1 | Validated telemetry | mqtt in | Topic `microhydros/v1/devices/+/telemetry/validated/+`, QoS 1, *auto-detect* |
-| 2 | Parse validated JSON | json | Turns the text into an object |
-| 3 | Build InfluxDB write | function | 1 output, code in appendix B |
-| 4 | InfluxDB write | http request | Method **use** (taken from `msg.method`), return *text* |
-| 5 | debug 1 | debug | Shows InfluxDB's answer (an empty answer means success) |
-| dev | Test water temperature | inject | Sends a timestamp when clicked |
-| dev | Create four test measurements | function | Makes four fake readings |
+InfluxDB is a database made for measurements over time. Every stored value has a time stamp. These words appear in the flow:
 
-The two *dev* nodes are only for testing without hardware. They sit in a group in the figure and can be left out.
+| Word | Meaning | In this project |
+|---|---|---|
+| **Organisation (org)** | The owner of the data, like a company account | `INFLUXDB_ORG` |
+| **Bucket** | A named storage area with a retention rule, like a database | `INFLUXDB_BUCKET` (`microhydros`) |
+| **Token** | The password of the API. Anyone with the token can write | `INFLUXDB_TOKEN` |
+| **Measurement** | A "table name" | always `sensor_reading` |
+| **Tag** | A label you filter by. Indexed, always text | `device_id`, `measurement_type`, `sensor_id`, `unit` |
+| **Field** | The actual value stored | `value` (a decimal number) plus `schema_version`, `sequence`, `uptime_ms`, `boot_id` |
+| **Time stamp** | When the reading was taken | milliseconds since 1970 |
+| **Point** | One row: measurement + tags + fields + time stamp | one sensor reading |
 
-**Wires:** 1 to 2 to 3 to 4 to 5. And for testing: inject to the test function to 3.
+A **series** is one unique combination of measurement and tags. For example `sensor_reading` with `device_id=esp32s3-01` and `measurement_type=water_temperature` is one series, and its points form the line in a graph. If you write a point with the same series **and** the same time stamp twice, the second one overwrites the first. That makes accidental repeats harmless.
 
-## 5.2 What "Build InfluxDB write" does
+**Tags or fields?** Values you filter or group by (which device, which sensor) are tags. Values you calculate with (24.7) are fields. Putting the temperature in a tag would break every graph.
 
-InfluxDB does not accept JSON. It wants *line protocol*, one line of text:
+The four settings the flow needs come from the Docker environment of the Node-RED container (`docker/compose.yaml`). `INFLUXDB_URL` is `http://influxdb:8086`, which is the name of the InfluxDB container inside the Docker network (the outside port 8087 is only for you). The other three come from the `.env` file next to the compose file, the same values InfluxDB was created with. You never type them into a node.
 
+## 5.2 How the message changes on the way
+
+![What the message looks like after each node](figures/nodered-guide/nr-influx.png)
+
+| After node | `msg.payload` | What else is on `msg` |
+|---|---|---|
+| 1. Validated telemetry | The raw **text** as it arrived | `topic`, `qos`, `retain` |
+| 2. Parse validated JSON | A JavaScript **object** | unchanged |
+| 3. Build InfluxDB write | **One line of text** in InfluxDB's format | `method`, `url`, `headers` added |
+| 4. InfluxDB write | The **answer** of InfluxDB (empty when all is well) | `statusCode` |
+| 5. debug 1 | (shown in the sidebar) | |
+
+## 5.3 Build it, click by click
+
+Skip this if you import `docker/node-red/flows/influxdb-storage.json`. Do it once by hand to learn.
+
+**Step 1: create the tab.** Click the **+** at the end of the tab bar. Double-click the new tab, set *Name* to `InfluxDB storage`, press Done.
+
+**Step 2: the mqtt in node.**
+1. Drag **mqtt in** (purple, left column of the palette) onto the canvas.
+2. Double-click it and fill in:
+
+| Property | Value |
+|---|---|
+| Server | *Local Mosquitto* (pick the shared connection from section 3.3) |
+| Action | Subscribe to single topic |
+| Topic | `microhydros/v1/devices/+/telemetry/validated/+` |
+| QoS | 1 |
+| Output | auto-detect (parsed JSON object or a string) |
+| Name | `Validated telemetry` |
+
+3. Press Done.
+
+Why two `+`? The first stands for the device, the second for the measurement name. One node receives every sensor of every device.
+
+**Step 3: the json node.** Drag **json** (yellow, in the "parser" group of the palette) to the right of it. Leave *Action* on *Convert between JSON String & Object* and *Property* on `msg.payload`. Name it `Parse validated JSON`. It turns text into an object; if the payload is already an object it leaves it alone. If the text is not valid JSON it raises an error and the message stops here.
+
+**Step 4: the function node.** Drag **function** (orange). Double-click it, set *Name* `Build InfluxDB write`, *Outputs* `1`, and paste the code of appendix B into the *On Message* tab. Press Done.
+
+**Step 5: the http request node.** Drag **http request**. Set:
+
+| Property | Value | Why |
+|---|---|---|
+| Method | **- set by msg.method -** ("use") | The function chooses `POST` |
+| URL | *(empty)* | The function chooses the address |
+| Payload | Send as request body | Default for a POST |
+| Return | a UTF-8 string | InfluxDB answers with plain text |
+| Name | `InfluxDB write` | |
+
+Leaving the URL empty is important. The node only accepts `msg.url` when its own URL field is empty.
+
+**Step 6: the debug node.** Drag **debug**. Keep the default (`msg.payload`, to debug window). Name it `debug 1`.
+
+**Step 7: wire them.** Drag from the small square on the right of a node to the small square on the left of the next: mqtt in, json, function, http request, debug. Five nodes, four wires.
+
+**Step 8: Deploy.** Press the red **Deploy** button. Under *Validated telemetry* the mqtt node should show a green dot and **connected**. A red dot means the broker cannot be reached (section 10).
+
+## 5.4 The function, part by part
+
+Open appendix B while you read. The code has four blocks.
+
+### Block 1: refuse bad input
+
+```javascript
+const reading = msg.payload;
+
+const allowedMeasurements = [
+    "internal_temperature", "internal_humidity",
+    "external_temperature", "water_temperature"
+];
+
+if (!allowedMeasurements.includes(reading.measurement)) {
+    node.error("Unsupported measurement type", msg);
+    return null;
+}
+if (!Number.isFinite(reading.value)) {
+    node.error("Measurement value is not finite", msg);
+    return null;
+}
+const timestamp = Date.parse(reading.timestamp);
+if (!Number.isFinite(timestamp)) {
+    node.error("Invalid timestamp", msg);
+    return null;
+}
 ```
-sensor_reading,device_id=esp32s3-01,measurement_type=water_temperature,sensor_id=water_ds18b20,unit=celsius value=24.7,schema_version=1i,sequence=1042i,uptime_ms=5000i,boot_id="b1" 1789887848000
+
+Tab 1 already validated the reading. Why check again? Because this tab listens to a topic anyone could publish on, and a database should not trust its input. Each check does the same two things: `node.error(...)` writes a red message in the sidebar, `return null` stops the message so nothing is sent. `Date.parse` turns the ISO text `2026-09-20T09:00:00.000Z` into milliseconds and gives `NaN` (not a number) when it cannot.
+
+### Block 2: escape special characters
+
+```javascript
+function escapeTag(value) {
+    return String(value)
+        .replace(/\\/g, "\\\\")   // backslash
+        .replace(/ /g, "\\ ")     // space
+        .replace(/,/g, "\\,")     // comma
+        .replace(/=/g, "\\=");    // equals sign
+}
+function escapeString(value) {
+    return String(value)
+        .replace(/\\/g, "\\\\")
+        .replace(/"/g, '\\"');
+}
+```
+
+Line protocol uses spaces, commas and equals signs as separators. A device called `my probe` would break the line, so those characters get a backslash in front (`my\ probe`). Text **fields** sit inside quotes, so only the backslash and the quote need escaping. This is the same kind of protection as escaping in an SQL query: it stops a value from being read as structure.
+
+### Block 3: the address and the key
+
+```javascript
+msg.method = "POST";
+msg.url =
+    `${env.get("INFLUXDB_URL")}/api/v2/write` +
+    `?org=${encodeURIComponent(env.get("INFLUXDB_ORG"))}` +
+    `&bucket=${encodeURIComponent(env.get("INFLUXDB_BUCKET"))}` +
+    `&precision=ms`;
+msg.headers = {
+    Authorization: `Token ${env.get("INFLUXDB_TOKEN")}`,
+    "Content-Type": "text/plain; charset=utf-8"
+};
 ```
 
 | Part | Meaning |
 |---|---|
-| `sensor_reading` | The table name (measurement) |
-| `device_id=...,measurement_type=...,sensor_id=...,unit=...` | **Tags**: things you filter and group by |
-| `value=24.7,sequence=1042i,...` | **Fields**: the numbers stored (`i` marks an integer) |
-| last number | Time in milliseconds |
+| `/api/v2/write` | InfluxDB's endpoint for writing data |
+| `org=`, `bucket=` | Where to put the data. `encodeURIComponent` makes odd characters safe in an address |
+| `precision=ms` | The last number of the line is in **milliseconds** (the default would be nanoseconds, and the data would end up in 1970) |
+| `Authorization: Token ...` | Proves we may write |
+| `Content-Type: text/plain` | The body is line protocol, not JSON |
 
-The function first checks the reading (known measurement, finite value, parseable time), escapes special characters in tags, then sets four fields on the message **for the next node to use**:
+The final address looks like this (values are examples):
 
-| Field | Value |
-|---|---|
-| `msg.method` | `POST` |
-| `msg.url` | `INFLUXDB_URL` + `/api/v2/write?org=...&bucket=...&precision=ms` |
-| `msg.headers` | `Authorization: Token <INFLUXDB_TOKEN>` and the content type |
-| `msg.payload` | The line above |
+```
+POST http://influxdb:8086/api/v2/write?org=microhydros&bucket=microhydros&precision=ms
+Authorization: Token <the token>
+Content-Type: text/plain; charset=utf-8
+```
 
-This is the pattern to remember: **the function builds the request, the http request node only sends it.** That is why the method is set to *use*: the node has no fixed address, it follows the message.
+### Block 4: the line
 
-## 5.3 Test it
+```javascript
+msg.payload =
+    `sensor_reading` +
+    `,device_id=${escapeTag(reading.device_id)}` +
+    `,measurement_type=${escapeTag(reading.measurement)}` +
+    `,sensor_id=${escapeTag(reading.sensor_id)}` +
+    `,unit=${escapeTag(reading.unit)}` +
+    ` value=${reading.value}` +
+    `,schema_version=${reading.schema_version}i` +
+    `,sequence=${reading.sequence}i` +
+    `,uptime_ms=${reading.uptime_ms}i` +
+    `,boot_id="${escapeString(reading.boot_id)}"` +
+    ` ${timestamp}`;
+return msg;
+```
 
-Click the blue square on the inject node, then look at the debug sidebar. An empty answer is success. To see the data, in the InfluxDB Data Explorer choose bucket `microhydros`, measurement `sensor_reading`, field `value`, and press submit.
+The result, for the reading in section 7.1, with the parts labelled:
 
-> Data Explorer only: choose the field `value`. The other fields (`boot_id` is text) cannot be averaged and give an error such as "unsupported input type for mean aggregate: string".
+```
+sensor_reading,device_id=esp32s3-01,measurement_type=water_temperature,sensor_id=water_ds18b20,unit=celsius value=24.7,schema_version=1i,sequence=1042i,uptime_ms=5000i,boot_id="b1" 1789887848000
+└ table ─────┘ └──────────────────────────── tags, separated by commas ─────────────────────────────────┘ └─ fields, separated by commas ──────────────────────────────┘ └─ time ──┘
+```
+
+Two spaces matter: **one** between the tags and the fields, **one** between the fields and the time. A comma or a space in the wrong place makes InfluxDB refuse the line with `400`. The `i` after a number means *integer*. Without it, InfluxDB stores a decimal, and if the first write of a field was a decimal, later integer writes to the same field are refused. That is why it is fixed here.
+
+Then `return msg` sends the same message on. `msg.method`, `msg.url` and `msg.headers` ride along to the next node, which reads them.
+
+## 5.5 The http request node and the answer
+
+The node sends `msg.payload` as the body of the request and waits. What comes back:
+
+| `msg.statusCode` | Meaning | `msg.payload` |
+|---|---|---|
+| **204** | Stored | empty (this is success) |
+| 400 | The line is malformed or a field type conflicts | An error text such as `unable to parse` |
+| 401 | Wrong or missing token | `unauthorized access` |
+| 404 | The org or the bucket does not exist | An error text |
+| network error | InfluxDB is down or the name is wrong | no message continues, an error appears in the sidebar and a *catch* node could react |
+
+The node passes the answer to `debug 1`. So an **empty** debug message is what a healthy system looks like, and it is easy to miss. To see the status code, set the debug node to show the **complete msg object**.
+
+There is no retry and no buffer. If InfluxDB is down for a minute, those readings are not stored. That is acceptable for a five-second sensor, and it keeps the flow simple. (A later improvement would be a queue.)
+
+## 5.6 The two test nodes
+
+Two extra nodes let you test without hardware. They are drawn in a group in the figure because they are not part of the real data path.
+
+| Node | Type | What it does |
+|---|---|---|
+| Test water temperature | inject | A blue button on the canvas. Click it, it sends a message with the current time |
+| Create four test measurements | function | Ignores what it receives and sends **four** messages, one per sensor, with a device called `simulator-01` |
+
+Look at the second one:
+
+```javascript
+for (const measurement of measurements) {
+    node.send({ payload: { ...common, ...measurement } });
+}
+return null;
+```
+
+`node.send(...)` sends a message **immediately**, as many times as you like. `return null` at the end sends nothing more. So the node emits four messages per click. `{ ...common, ...measurement }` builds one object from two: the shared fields (device, boot id, time) plus the fields of one sensor. Both wires go into *Build InfluxDB write*, so the test messages travel through the real code.
+
+## 5.7 Test it in three levels
+
+**Level 1, the inject button.** Click the blue square on *Test water temperature*. The debug sidebar (bug icon) should show four empty messages, one per write. A message with text is an error: read it.
+
+**Level 2, the whole chain from the broker.** Publish a raw message as in section 4.4. Tab 1 validates it, tab 2 stores the four values. Use a real device name such as `test-01`.
+
+**Level 3, ask InfluxDB directly.** Open the InfluxDB web page (port 8087), *Data Explorer*, and use the **Script Editor** with this query (a few lines of Flux, InfluxDB's query language):
+
+```
+from(bucket: "microhydros")
+  |> range(start: -15m)
+  |> filter(fn: (r) => r._measurement == "sensor_reading")
+  |> filter(fn: (r) => r._field == "value")
+  |> filter(fn: (r) => r.device_id == "simulator-01")
+```
+
+Read it top to bottom like a pipeline: take the bucket, keep the last 15 minutes, keep the table `sensor_reading`, keep the field `value`, keep one device. You should see four series (one per sensor). To remove the test data afterwards, use the *Delete Data* option for `device_id="simulator-01"`.
+
+> In the point-and-click builder select the field `value` only. The other fields (`boot_id` is text) cannot be averaged and give the error "unsupported input type for mean aggregate: string".
+
+## 5.8 How Grafana reads it
+
+Grafana has a data source pointing at `http://influxdb:8086` (Flux language, the same org and bucket). Each panel runs a query like the one above. The panel "Current water temperature" takes the **last** value of `water_temperature`, the history graph takes all values in the chosen time range. Nothing in Node-RED talks to Grafana. Both only meet in the database. If a panel is empty, first run the query in level 3. If InfluxDB has data, the problem is in Grafana (time range, data source, auto-refresh). If InfluxDB is empty, the problem is in the flow.
+
+## 5.9 What can go wrong here
+
+| Symptom | Probable cause | Fix |
+|---|---|---|
+| mqtt in shows a red dot | Broker name or port wrong | Server `mosquitto`, port `1883` |
+| Sidebar: "Unsupported measurement type" | A measurement name not in `allowedMeasurements` | Add it (section 11) or fix the sender |
+| Sidebar: "Invalid timestamp" | The reading has no `timestamp` | Check tab 1 output |
+| Sidebar: `TypeError` in the function | The json node is missing, so `msg.payload` is still text | Check the wire from json to the function |
+| debug shows `unauthorized access` (401) | `INFLUXDB_TOKEN` differs from the one InfluxDB was created with | Compare `.env` with InfluxDB, recreate the Node-RED container |
+| debug shows a 404 message | Wrong org or bucket name | Compare `INFLUXDB_ORG` and `INFLUXDB_BUCKET` |
+| debug shows `unable to parse` (400) | An unescaped character in a tag, or a missing `i` | Print `msg.payload` in a debug node and read the line |
+| "connect ECONNREFUSED" or "getaddrinfo ENOTFOUND" | `INFLUXDB_URL` wrong or InfluxDB is down | It must be `http://influxdb:8086` inside Docker |
+| Everything is green but Grafana is empty | Time range, or the tab is disabled | Run the Flux query, check the tab is not greyed out |
+| Values in 1970 | `precision=ms` is missing from the address | Restore block 3 |
+
+## 5.10 Summary of tab 2
+
+1. It listens to every validated reading.
+2. It parses the text, checks it, and builds an InfluxDB line.
+3. It sets method, address and key on the message and lets a generic node send it.
+4. It prints InfluxDB's answer. Empty means success.
+5. The dev nodes let you test with a click.
 
 ---
 
