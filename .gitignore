@@ -36,3 +36,9 @@ backups/
 # Secret key files must never be committed, wherever they are created
 .anthropic_key
 *_key
+
+# Password and token files used by the live import scripts
+.nodered_password
+.leaflimits_token
+*_password
+*_token
