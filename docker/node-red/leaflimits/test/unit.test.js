@@ -384,13 +384,42 @@ test('suggest-parse: negative or non-numeric confidence becomes 0..1', () => {
     assert.equal(run('Clean AI answer', aiAnswer({ plant: 'x', confidence: -3, limits: {} })).result.payload.confidence, 0);
     assert.equal(run('Clean AI answer', aiAnswer({ plant: 'x', confidence: 'high', limits: {} })).result.payload.confidence, 0);
 });
-test('suggest-parse: upstream errors and unusable answers become 502 without leaking details', () => {
-    for (const status of [400, 401, 429, 500, 529]) {
-        const { result, node } = run('Clean AI answer', aiAnswer({}, status));
-        assert.equal(result.statusCode, 502, String(status));
-        assert.ok(!JSON.stringify(result.payload).includes('sk-'));
+const upstream = (status, type, message) => ({ statusCode: status, payload: { type: 'error', error: { type, message } }, req: {}, res: {} });
+test('suggest-parse: upstream errors are explained in plain words and logged with their type and message', () => {
+    const cases = [
+        [upstream(401, 'authentication_error', 'API key is invalid.'), 502, /key on the server was rejected/],
+        [upstream(403, 'permission_error', 'Not allowed.'), 502, /key on the server was rejected/],
+        [upstream(400, 'invalid_request_error', 'Your credit balance is too low to access the Anthropic API.'), 502, /no credit left/],
+        [upstream(404, 'not_found_error', 'model: claude-x'), 502, /model is not available/],
+        [upstream(429, 'rate_limit_error', 'slow down'), 503, /busy/],
+        [upstream(529, 'overloaded_error', 'Overloaded'), 503, /busy/],
+        [upstream(503, 'api_error', 'x'), 503, /busy/],
+        [upstream(400, 'invalid_request_error', 'messages: something else'), 502, /refused the request or is not available/],
+        [upstream(500, 'api_error', 'Internal server error'), 502, /refused the request or is not available/]
+    ];
+    for (const [msg, status, pattern] of cases) {
+        const { type, message } = msg.payload.error;   // the function reuses msg for its reply, so read these first
+        const upstreamStatus = msg.statusCode;
+        const { result, node } = run('Clean AI answer', msg);
+        assert.equal(result.statusCode, status, message);
+        assert.match(result.payload.message, pattern);
+        assert.equal(node.logs.warn.length, 1);
+        assert.match(node.logs.warn[0], new RegExp('status ' + upstreamStatus + ' \\(' + type + '\\)'), 'the log keeps the type Anthropic sent');
+        assert.ok(!/sk-/.test(JSON.stringify(result.payload)), 'no key material in the answer');
+    }
+});
+test('suggest-parse: an upstream error without a readable body is still handled', () => {
+    for (const payload of [undefined, null, 'oops', {}, { error: 'text' }, { error: null }]) {
+        const { result, node } = run('Clean AI answer', { statusCode: 500, payload });
+        assert.equal(result.statusCode, 502);
         assert.equal(node.logs.warn.length, 1);
     }
+});
+test('suggest-parse: a very long upstream message is cut in the log', () => {
+    const { node } = run('Clean AI answer', upstream(400, 'invalid_request_error', 'x'.repeat(5000)));
+    assert.ok(node.logs.warn[0].length < 320);
+});
+test('suggest-parse: unusable 200 answers become 502', () => {
     assert.equal(run('Clean AI answer', { statusCode: 200, payload: { content: [{ type: 'text', text: 'no tool' }] } }).result.statusCode, 502);
     assert.equal(run('Clean AI answer', { statusCode: 200, payload: 'html' }).result.statusCode, 502);
     assert.equal(run('Clean AI answer', { statusCode: 200, payload: { content: [{ type: 'tool_use', name: 'other', input: {} }] } }).result.statusCode, 502);
