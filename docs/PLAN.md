@@ -2,7 +2,7 @@
 
 Extension and deployment plan for MicroHydros: an Angular app, AI suggestions, a parallel Node-RED flow and a portable deployment.
 
-**Author:** BasitMN   **Written:** 2026-09-19   **Revised:** 2026-09-19 after the live server check   **Status:** the Angular app and the Node-RED LeafLimits tab are built and tested (app: 27 unit tests; tab: 54 unit tests and 13 integration tests). On 2026-09-20 the tab was imported into the live Node-RED, DISABLED, and the app files were copied to its data folder. The token and AI key are not set and the tab is not enabled yet. Phases D1 and D1b (deploy files) are written but not yet run on Docker
+**Author:** BasitMN   **Written:** 2026-09-19   **Revised:** 2026-09-19 after the live server check   **Status:** the Angular app and the Node-RED LeafLimits tab are built and tested (app: 27 unit tests; tab: 54 unit tests and 13 integration tests) and LIVE since 2026-09-20: the tab is imported, configured and enabled in the Hetzner Node-RED, the app is served at http://95.216.208.235:1881/leaflimits/, and the team's InfluxDB storage tab was switched back on. The real Claude API was verified from the server. Phases D1 and D1b (deploy files) are written but not yet run on Docker
 
 The original MicroHydros stack (PR #16) is not changed by this plan. LeafLimits lives in its own private repository, `BasitMN/leaflimits-ai`. Its `main` branch is an exact copy of the PR #16 branch, and the work happens on other branches.
 
@@ -214,7 +214,7 @@ on Hetzner with its own ports and memory limits, instead of on a PC.
 | 1 | Angular app: Current, Photo, Review, Settings, mock backend | Done. 15 unit tests, 275 kB build |
 | 2 | Node-RED tab: evaluation, limits API, retained-MQTT storage, app hosting | Done. 51 unit tests and 13 integration tests |
 | 3 | AI suggestion endpoint with schema checks, clamping and a rate limit | Done and tested against a fake Claude API. Needs a real Anthropic API key to try for real |
-| 4 | Import the tab into the live Node-RED (disabled), set the token, enable | Import done 2026-09-20 with `dev/live-import.js`: 15 existing nodes unchanged, MQTT connection not touched, tab disabled. Still to do: set the token and AI key (`--configure`) and enable (`--enable`) |
+| 4 | Import the tab into the live Node-RED (disabled), set the token, enable | Done 2026-09-20 with `dev/live-import.js`: 15 existing nodes unchanged, no restart of the container or the MQTT connection, token and AI key set as encrypted credentials, tab enabled, storage tab enabled. Verified end to end with a marked test device (validated, stored, classified, test points deleted) and a real AI request from the server |
 | 5 | Grafana threshold lines and alert history | Not started. Needs limit data in InfluxDB, which v1 does not write |
 | 6 | HTTPS in front of the app and API | Not started. Part of the D2 hardening |
 
@@ -239,7 +239,8 @@ on Hetzner with its own ports and memory limits, instead of on a PC.
 
 - **Re-enable the "InfluxDB storage" tab on the live server.** It was disabled by mistake. This is a one-click change in the Node-RED editor, and I have not made it.
 - Confirm the PC (stage E1) has Docker with Compose v2, about 1 GB free RAM and the default ports free.
-- **Set the token and the AI key on the live tab, then enable it** (`live-import.js --configure`, then `--enable`). Rollback at any time: `--disable` or `--remove`. The Node-RED editor password was shared in a chat, so change it afterwards.
+- **Change the Node-RED editor password.** It was shared in a chat on 2026-09-20. Rollback of LeafLimits at any time: `live-import.js --disable` or `--remove` (needs the editor password in a file). The storage tab can be switched with `--disable-storage` / `--enable-storage`.
+- The access token and the app travel over plain HTTP. Consider HTTPS in front (phase D2) before using it on untrusted networks.
 - Decide on a scheduled backup of the live flows (at least weekly and before every change). Today nothing backs up the Node-RED volume.
 - **Get an Anthropic API key** and set it as the tab variable `ANTHROPIC_API_KEY`. Without it the app still works, with limits entered by hand.
 - Confirm the DS18B20 ROM pinning (water vs external probe) is finished.
