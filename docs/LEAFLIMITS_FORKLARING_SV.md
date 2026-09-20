@@ -6,6 +6,8 @@ Det här dokumentet förklarar steg för steg hur LeafLimits fungerar, från sen
 
 > **Så läser du dokumentet.** Vill du bara förstå idén räcker kapitel 1 till 3. Vill du kunna använda systemet: läs kapitel 14. Vill du förstå exakt hur det funkar inuti: läs allt.
 
+<<pagebreak>>
+
 ## Innehåll
 
 1. Vad är LeafLimits?
@@ -25,6 +27,8 @@ Det här dokumentet förklarar steg för steg hur LeafLimits fungerar, från sen
 15. Del 12: Felsökning
 16. Vanliga frågor
 17. Kända begränsningar och vad som återstår
+
+<<pagebreak>>
 
 ## 1. Vad är LeafLimits?
 
@@ -103,30 +107,9 @@ Här är orden du kommer att stöta på, förklarade så enkelt det går.
 
 ## 3. Helhetsbilden
 
-Så här hänger allt ihop. Läs den från toppen och neråt.
+Så här hänger allt ihop. Pilarna visar åt vilket håll informationen går. Rutan i mitten är Node-RED, som innehåller tre flikar: två som fanns förut och en ny.
 
-```
- [ESP32-S3 med sensorer]  i växtlådan
-      |  var 5:e sekund, via WiFi
-      v
- [Mosquitto, MQTT-broker]  postkontoret            port 1884
-      |
-      v
- [Node-RED, fliken "MQTT Validation"]   kontrollerar att mätvärdena är rimliga
-      |
-      +--> godkända mätvärden ("validated")
-      |        |
-      |        +--> [Node-RED, fliken "InfluxDB storage"]
-      |        |          --> [InfluxDB]  sparar --> [Grafana]  ritar grafer
-      |        |
-      |        +--> [Node-RED, fliken "LeafLimits"]   NYTT
-      |                   jämför med växtens gränser
-      |                   --> larm (MQTT)
-      |                   --> API + appfiler (HTTP)  <--- [LeafLimits-appen i din mobil]
-      |                   --> [Claude, AI hos Anthropic]  förslag utifrån ett foto
-      |
-      +--> underkända mätvärden ("rejected") med orsak
-```
+![Figur 1: Helhetsbilden, från sensor till app](fig-overview)
 
 ### Vad som fanns förut och vad som är nytt
 
@@ -173,6 +156,8 @@ Just nu är det **inte inställt**: firmware hittar sensorerna i den ordning de 
 
 > **Att göra (uppgift för PC-sessionen):** ta reda på vilket ROM-nummer som är vatten och vilket som är luft (doppa en probe i varmt vatten och se vilket värde som stiger), skriv in dem i inställningarna CONFIG_DS18B20_WATER_ROM och CONFIG_DS18B20_EXTERNAL_ROM och flasha om datorn. Två kandidater hittades tidigare: BE0000006DEFD428 och DA00000070118128, men vilken som är vilken är inte bekräftat.
 
+![Figur 2: Så är sensorerna kopplade, och frågan om vilken probe som är vatten och vilken som är luft](fig-sensors)
+
 ### 4.3 MQTT: postkontoret
 
 Datorn skickar inte data direkt till en databas. Den lägger meddelanden i en **brevlåda** hos en **MQTT-broker** (Mosquitto). Andra program som vill ha datan **prenumererar** på brevlådan och får varje nytt meddelande. Fördelen är att avsändaren och mottagarna inte behöver känna till varandra. Vi kan lägga till nya mottagare (som LeafLimits) utan att ändra något hos ESP32.
@@ -188,6 +173,10 @@ Brevlådornas namn (topics) ser ut som sökvägar:
 | microhydros/v1/devices/esp32s3-01/limits/alert | Node-RED (LeafLimits) | Larm när ett tillstånd ändras |
 
 Delen esp32s3-01 är enhetens namn. Om man får fler enheter byter de bara namn i topicen.
+
+Figuren visar vem som lägger brev i vilken brevlåda och vem som hämtar dem. Notera att LeafLimits både hämtar (validated och config) och lägger (config och alert).
+
+![Figur 3: Brevlådorna i Mosquitto, vem som lägger brev och vem som hämtar dem](fig-pubsub)
 
 ### 4.4 Meddelandet: JSON
 
@@ -243,7 +232,9 @@ Innan något sparas kontrollerar Node-RED-fliken **MQTT Validation** varje medde
 | external_temperature | -40 till 60 grader |
 | water_temperature | 0 till 50 grader |
 
-Ett värde som klarar allt publiceras på sin egen brevlåda under **validated**. Ett som inte klarar det hamnar under **rejected** tillsammans med en orsakskod, till exempel sensor_read_error eller out_of_plausible_range. Eftersom varje mätvärde kontrolleras för sig kan en trasig sensor inte stoppa de andra tre.
+Ett värde som klarar allt publiceras på sin egen brevlåda under **validated**. Ett som inte klarar det hamnar under **rejected** tillsammans med en orsakskod, till exempel sensor_read_error eller out_of_plausible_range. Eftersom varje mätvärde kontrolleras för sig kan en trasig sensor inte stoppa de andra tre. Flödesschemat visar beslutsvägen för ett meddelande.
+
+![Figur 4: Så kontrolleras ett meddelande i fliken MQTT Validation](fig-validation)
 
 ### 5.2 Validering är inte samma sak som gränsvärden
 
@@ -323,6 +314,10 @@ Gränserna får inte ligga utanför sensorns **plausibla intervall** (kapitel 5)
 | high | Värdet är för högt | För hög (röd) |
 | unknown | Ingen gräns är satt, eller inget värde har bedömts än | Ingen gräns satt, eller Väntar på mätvärde |
 
+Figuren visar hur ett tillstånd byter till ett annat och vad som krävs för det.
+
+![Figur 5: Tillståndsdiagram för varje sensor](fig-states)
+
 ### 7.3 Reglerna: när blir det larm?
 
 Man skulle kunna larma så fort ett enda värde ligger fel. Men sensorer brusar: ett enstaka konstigt värde är ofta inget problem. Därför gäller tre regler:
@@ -346,6 +341,10 @@ Man skulle kunna larma så fort ett enda värde ligger fel. Men sensorer brusar:
 | 7 | 23,4 | Tillbaka, 2 i rad. **Larm släpps.** | ok |
 
 Om värdena i stället vore 25, 25, 20, 25, 25 skulle inget larm gå, eftersom serien bryts av ett värde inom gränsen.
+
+Samma exempel som diagram. Rödprickig linje är max, den orangea prickade är marginalen.
+
+![Figur 6: Räkneexemplet som diagram, med larm och marginal](fig-chart)
 
 När du sparar nya gränser **börjar bedömningen om från noll**. De senaste värdena behålls, men tillståndet blir unknown tills nya mätvärden har bedömts. Det är därför appen kan visa "Väntar på mätvärde" i några sekunder efter att du sparat.
 
@@ -376,6 +375,8 @@ Var ska gränserna ligga så att de överlever att Node-RED startar om? Vi valde
 1. När du sparar gränser i appen lägger Node-RED ett retained-meddelande i brevlådan .../limits/config.
 2. Node-RED prenumererar på samma brevlåda och får därför alltid tillbaka sina egna gränser, även efter en omstart.
 3. Vill man ta bort en profil skickar man ett tomt retained-meddelande.
+
+![Figur 7: Så överlever gränserna att Node-RED startar om](fig-retained)
 
 > **Varför retained i stället för en fil eller databas?** Det krävde ingen ändring av serverns inställningar eller något nytt program. Mosquitto sparar meddelandena i sin egen lagring. Det gjorde att LeafLimits kunde läggas in utan att röra något som redan fungerade. Det bevisades i ett test: Node-RED startades om och gränserna kom tillbaka av sig själva.
 
@@ -428,6 +429,8 @@ Fliken LeafLimits har fyra avsnitt (38 noder):
 6. Claude svarar genom att fylla i ett **verktygsanrop** med fasta fält.
 7. Node-RED **rensar** svaret: allt kontrolleras mot sensorernas plausibla intervall och ogiltiga gränser slängs.
 8. Appen visar svaret på sidan Granska, där du ändrar och sparar (eller avbryter).
+
+![Figur 8: Från foto till förslag, uppdelat på vem som gör vad](fig-ai)
 
 ### 8.2 Instruktionen till AI:n (prompten)
 
@@ -497,6 +500,27 @@ Appen är en webbapp byggd med **Angular 21**. Du öppnar den i webbläsaren på
 | Granska | Fälten för växtens namn och min och max för varje sensor. Har AI:n gett ett förslag är de förifyllda och du ser dess konfidens och anteckningar. Felmeddelande visas om min inte är lägre än max eller om värdet ligger utanför det tillåtna. Sparar gör du med Spara gränser. |
 | Inställningar | Din åtkomsttoken och enhetens namn. Sparas bara i din webbläsare. |
 
+![Figur 9: De fyra skärmarna i appen (appens text är engelsk)](fig-screens)
+
+**Appens text är på engelska.** Här är översättningen av det du ser:
+
+| I appen | På svenska |
+|---|---|
+| Current | Aktuellt |
+| Photo | Foto |
+| Review | Granska |
+| Settings | Inställningar |
+| Take a photo | Ta ett foto |
+| Choose from gallery | Välj från galleriet |
+| Edit by hand | Redigera för hand |
+| Get suggested limits | Hämta föreslagna gränser |
+| Save limits | Spara gränser |
+| In range | I intervall |
+| Too low | För låg |
+| Too high | För hög |
+| No limit set | Ingen gräns satt |
+| Waiting for a reading | Väntar på mätvärde |
+
 ### 9.2 Fotot: kamera, galleri och kontroller
 
 - **Ta ett foto** öppnar kameran direkt på telefonen. **Välj från galleriet** använder den vanliga filväljaren, så du kan ta ett foto du redan har.
@@ -522,7 +546,9 @@ Fältet i inställningarna är till för LeafLimits-token. Någon klistrade en g
 
 ## 10. Del 7: Lösenord, nycklar och säkerhet
 
-Det finns flera hemligheter i projektet. Det är viktigt att inte blanda ihop dem.
+Det finns flera hemligheter i projektet. Det är viktigt att inte blanda ihop dem. Figuren visar vilken hemlighet som finns var, och vad som aldrig får hamna i appen.
+
+![Figur 10: Vilken hemlighet som finns var](fig-secrets)
 
 | Hemlighet | Vad den gör | Var den finns | Skrivs in i appen? |
 |---|---|---|---|
@@ -567,6 +593,8 @@ LeafLimits lades in som en **ny flik** i den befintliga Node-RED. Fliken läser 
 7. **Teamets lagringsflik slogs på igen.** Den hade av misstag varit avstängd sedan 18 september, så inget hade sparats.
 8. **Slut-till-slut-test på riktigt:** ett tydligt märkt testmätvärde (enhet leaflimits-test) skickades genom systemet. Det godkändes, sparades i InfluxDB och bedömdes av LeafLimits. Sedan raderades exakt de fyra testpunkterna.
 9. **En riktig AI-förfrågan från servern** gjordes och lyckades.
+
+![Figur 11: De steg som togs för att lägga in LeafLimits säkert](fig-deploy)
 
 ### 11.3 Vad som bevisades efteråt
 
