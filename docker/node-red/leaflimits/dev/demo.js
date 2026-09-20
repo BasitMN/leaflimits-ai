@@ -23,7 +23,8 @@ const { createRequire } = require('node:module');
 const HOME = process.env.LL_DEMO_HOME || path.join(os.tmpdir(), 'leaflimits-demo');
 const MODS = process.env.LL_DEMO_MODULES || path.join(HOME, 'modules');
 const APP_DIR = process.env.LL_DEMO_APP_DIR || path.join(HOME, 'app-dist', 'browser');
-const KEY_FILE = process.env.LL_DEMO_KEY_FILE || '/root/ws/.anthropic_key';
+// Default: <ws folder>/.anthropic_key, next to the repository (five folders up from dev/).
+const KEY_FILE = process.env.LL_DEMO_KEY_FILE || path.resolve(__dirname, '..', '..', '..', '..', '..', '.anthropic_key');
 const TOKEN = process.env.LL_DEMO_TOKEN || 'demo';
 const DEVICE = process.env.LL_DEMO_DEVICE || 'esp32s3-01';
 const PORT = Number(process.env.LL_DEMO_PORT || 1880);
