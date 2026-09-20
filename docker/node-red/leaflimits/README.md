@@ -92,6 +92,31 @@ Everything below touches only Node-RED and its own data folder. Mosquitto, Influ
 
 The storage tab ("InfluxDB storage") must be enabled for readings to reach InfluxDB. That is independent of this tab.
 
+## Put it on the live Node-RED with a script (`dev/live-import.js`)
+
+The manual steps above can be replaced by one script that uses the Node-RED admin API. It was rehearsed on a copy of the live flows
+(imported, configured, enabled, a real reading sent through it, disabled, re-enabled, removed while enabled). In that rehearsal all
+existing nodes stayed byte-for-byte identical, the existing MQTT connection was never disconnected, and the rollback restored the
+original exactly.
+
+```bash
+export NR_URL=http://<server>:1881 NR_PASSWORD_FILE=/path/to/.nodered_password
+export LL_TOKEN_FILE=/path/to/.leaflimits_token LL_KEY_FILE=/path/to/.anthropic_key
+node docker/node-red/leaflimits/dev/live-import.js --status         # read-only
+node docker/node-red/leaflimits/dev/live-import.js --dry-run        # all checks, changes nothing
+node docker/node-red/leaflimits/dev/live-import.js                  # import, tab stays DISABLED
+node docker/node-red/leaflimits/dev/live-import.js --configure      # sets the token and the AI key on the tab (from the files)
+node docker/node-red/leaflimits/dev/live-import.js --enable         # enables the tab and probes the API
+node docker/node-red/leaflimits/dev/live-import.js --disable        # back to the original behaviour
+node docker/node-red/leaflimits/dev/live-import.js --remove         # full rollback
+```
+
+Safety built in: it refuses to import twice, checks that the existing MQTT broker node exists, uses the revision it read (a change made
+meanwhile gives a 409 and nothing is overwritten), deploys with the smallest scope so unchanged tabs are not restarted, and proves after every
+change that every node outside the LeafLimits tab is unchanged. The token and the key are read from files and are never printed. They are stored
+by Node-RED as encrypted credentials, not in `flows.json`. `dev/save-nodered-password.sh` saves the editor password (hidden input, next to the repo).
+The built app still has to be copied into `/data/leaflimits-app` in the Node-RED container (see the manual step 2).
+
 ## Try it locally before touching the server (demo runner)
 
 `dev/demo.js` starts a private copy of the pipeline that lives only on the machine it runs on: an in-process MQTT broker
