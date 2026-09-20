@@ -109,6 +109,8 @@ node docker/node-red/leaflimits/dev/live-import.js --configure      # sets the t
 node docker/node-red/leaflimits/dev/live-import.js --enable         # enables the tab and probes the API
 node docker/node-red/leaflimits/dev/live-import.js --disable        # back to the original behaviour
 node docker/node-red/leaflimits/dev/live-import.js --remove         # full rollback
+node docker/node-red/leaflimits/dev/live-import.js --enable-storage  # switch the team's "InfluxDB storage" tab on (only its enabled flag changes)
+node docker/node-red/leaflimits/dev/live-import.js --disable-storage
 ```
 
 Safety built in: it refuses to import twice, checks that the existing MQTT broker node exists, uses the revision it read (a change made

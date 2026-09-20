@@ -12,6 +12,7 @@
 //   --enable      enable the tab, then probe the API
 //   --disable     disable the tab again (back to the original behaviour, tab stays imported)
 //   --remove      rollback: delete the tab and its nodes
+//   --enable-storage / --disable-storage   switch the team's "InfluxDB storage" tab on or off (nothing else changes)
 // Environment:
 //   NR_USER            editor user (default: microhydros)
 //   NR_PASSWORD_FILE   file with the editor password. Never printed, never on a command line
@@ -27,7 +28,7 @@ const BASE = (process.env.NR_URL || '').replace(/\/+$/, '');
 const USER = process.env.NR_USER || 'microhydros';
 const PW_FILE = process.env.NR_PASSWORD_FILE;
 const DRY = process.argv.includes('--dry-run');
-const MODES = ['--status', '--configure', '--enable', '--disable', '--remove'].filter((m) => process.argv.includes(m));
+const MODES = ['--status', '--configure', '--enable', '--disable', '--remove', '--enable-storage', '--disable-storage'].filter((m) => process.argv.includes(m));
 const MODE = MODES[0] || '--import';
 const FLOW_FILE = path.join(__dirname, '..', '..', 'flows', 'leaflimits.json');
 const LABEL = 'LeafLimits';
@@ -99,6 +100,25 @@ async function probeApi() {
     if (MODE === '--status') {
         await logout();
         return say(tab ? `LeafLimits: imported (${present.length} items), ${tab.disabled ? 'DISABLED' : 'ENABLED'}.` : 'LeafLimits: not imported.');
+    }
+
+    if (MODE === '--enable-storage' || MODE === '--disable-storage') {
+        const storage = before.flows.find((n) => n.type === 'tab' && n.label === 'InfluxDB storage');
+        if (!storage) { await logout(); die('there is no tab called "InfluxDB storage" in this Node-RED'); }
+        const disabled = MODE === '--disable-storage';
+        if (Boolean(storage.disabled) === disabled) { await logout(); return say('The storage tab is already ' + (disabled ? 'disabled' : 'enabled') + '. Nothing to do.'); }
+        say('Will ' + (disabled ? 'DISABLE' : 'ENABLE') + ' the tab "InfluxDB storage". Nothing else changes.');
+        if (DRY) { await logout(); return say('DRY RUN: nothing was changed.'); }
+        await deploy(before.rev, before.flows.map((n) => (n.id === storage.id ? Object.assign({}, n, { disabled }) : n)), 'flows');
+        const after = await readFlows();
+        assert.equal(after.flows.length, before.flows.length, 'unexpected node count');
+        for (const n of before.flows) {
+            const now = after.flows.find((x) => x.id === n.id);
+            if (n.id === storage.id) assert.deepStrictEqual(now, Object.assign({}, n, { disabled }), 'the storage tab changed in more than its enabled flag');
+            else assert.deepStrictEqual(now, n, 'node ' + n.id + ' was changed');
+        }
+        await logout();
+        return say('Done. After: ' + summary(after.flows) + '\nChecked: the only difference is the enabled flag of the storage tab; every other node (including LeafLimits) is unchanged.');
     }
 
     if (MODE === '--remove') {
