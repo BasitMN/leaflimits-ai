@@ -182,7 +182,7 @@ the running flows exist **only in the Docker volume** `docker_node_red_data` (mo
 
 ```bash
 node docker/node-red/leaflimits/build.js                        # regenerate flows/leaflimits.json
-node --test docker/node-red/leaflimits/test/unit.test.js        # 51 tests, no dependencies
+node --test docker/node-red/leaflimits/test/unit.test.js        # 54 tests, no dependencies
 ```
 
 The unit tests run the exact function texts that end up in the flow. The integration test starts a real Node-RED 5.0.7

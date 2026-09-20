@@ -46,7 +46,7 @@ while(i<lines.length){const l=lines[i];
   else if((m=l.match(/^## (.*)/))){kids.push(new Paragraph({heading:HeadingLevel.HEADING_1,children:[new TextRun(m[1])]}));inNum=false;}
   else if((m=l.match(/^### (.*)/))){kids.push(new Paragraph({heading:HeadingLevel.HEADING_2,children:[new TextRun(m[1])]}));inNum=false;}
   else if((m=l.match(/^!\[(.*?)\]\((.*?)\)\s*$/))){
-    const buf=fs.readFileSync(path.join(figDir||'.',m[2]+'.png')); const s=pngSize(buf);
+    const buf=fs.readFileSync(path.join(figDir||'.',path.basename(m[2]).replace(/\.png$/,'')+'.png')); const s=pngSize(buf);
     const W=600, maxH=780; let w=W, h=Math.round(W*s.h/s.w); if(h>maxH){h=maxH; w=Math.round(maxH*s.w/s.h);}
     kids.push(new Paragraph({alignment:AlignmentType.CENTER,keepNext:true,keepLines:true,spacing:{before:120,after:40},children:[new ImageRun({type:'png',data:buf,transformation:{width:w,height:h},altText:{title:m[1],description:m[1],name:m[2]}})]}));
     kids.push(new Paragraph({alignment:AlignmentType.CENTER,spacing:{after:200},children:[new TextRun({text:m[1],italics:true,size:19,color:'5A6770'})]}));inNum=false;}
