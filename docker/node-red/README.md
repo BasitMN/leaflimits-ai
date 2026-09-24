@@ -187,3 +187,7 @@ For the complete telemetry pipeline:
 - Timestamps assigned by Node-RED; incorrect system clock affects all timestamps
 - Rejected messages are not retained; lost if no subscribers connected when published
 - Storage flow uses InfluxDB admin token; should use scoped write-only token in production
+
+## LeafLimits tab
+
+An additive tab for plant-specific limits lives in [`leaflimits/`](leaflimits/README.md). Import `flows/leaflimits.json` (it arrives disabled).
