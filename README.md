@@ -1,5 +1,5 @@
-# MicroHydros
-
+# leaflimits-ai
+## AI-powered plant threshold logic for MicroHydros
 ## Utveckling av en IoT- och embeddedprototyp
 
 MicroHydros is an IoT prototype that monitors a small growing environment (e.g. hydroponics). An ESP32-S3 sensor node reads internal air temperature/humidity (SHT31) and water and external air temperature (two DS18B20 probes), and publishes one raw MQTT telemetry message every 5 seconds. A Docker-based backend (Mosquitto, Node-RED, InfluxDB, Grafana) validates, stores and displays the measurements. See [`docs/architecture.md`](docs/architecture.md) for the full system design and [`docs/data-contract.md`](docs/data-contract.md) for the exact MQTT/JSON contract.
