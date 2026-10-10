@@ -1,4 +1,4 @@
-# leaflimits-ai
+# LeafLimits-ai
 ## AI-powered plant threshold logic for MicroHydros
 ## Utveckling av en IoT- och embeddedprototyp
 
